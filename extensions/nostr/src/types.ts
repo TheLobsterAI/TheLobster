@@ -8,6 +8,8 @@ export interface NostrAccountConfig {
   name?: string;
   privateKey?: string;
   relays?: string[];
+  /** DM protocol: "nip17" (default, gift-wrapped) or "nip04" (legacy) */
+  dmProtocol?: "nip17" | "nip04";
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   allowFrom?: Array<string | number>;
   profile?: NostrProfile;
@@ -21,6 +23,8 @@ export interface ResolvedNostrAccount {
   privateKey: string;
   publicKey: string;
   relays: string[];
+  /** DM protocol: "nip17" (default) or "nip04" */
+  dmProtocol: "nip17" | "nip04";
   profile?: NostrProfile;
   config: NostrAccountConfig;
 }
@@ -87,12 +91,14 @@ export function resolveNostrAccount(opts: {
     privateKey,
     publicKey,
     relays: nostrCfg?.relays ?? DEFAULT_RELAYS,
+    dmProtocol: nostrCfg?.dmProtocol ?? "nip17",
     profile: nostrCfg?.profile,
     config: {
       enabled: nostrCfg?.enabled,
       name: nostrCfg?.name,
       privateKey: nostrCfg?.privateKey,
       relays: nostrCfg?.relays,
+      dmProtocol: nostrCfg?.dmProtocol,
       dmPolicy: nostrCfg?.dmPolicy,
       allowFrom: nostrCfg?.allowFrom,
       profile: nostrCfg?.profile,

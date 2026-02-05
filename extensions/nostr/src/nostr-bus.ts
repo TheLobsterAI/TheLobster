@@ -6,7 +6,10 @@ import {
   nip19,
   type Event,
 } from "nostr-tools";
-import { decrypt, encrypt } from "nostr-tools/nip04";
+import { decrypt as nip04Decrypt, encrypt as nip04Encrypt } from "nostr-tools/nip04";
+import { createGiftWrap, unwrapGiftWrap } from "./nip17.js";
+import { getRelaysForDm } from "./nip65.js";
+import { createAuthHandler, type AuthHandler } from "./nip42.js";
 import type { NostrProfile } from "./config-schema.js";
 import {
   createMetrics,
@@ -53,6 +56,12 @@ export interface NostrBusOptions {
   relays?: string[];
   /** Account ID for state persistence (optional, defaults to pubkey prefix) */
   accountId?: string;
+  /**
+   * DM protocol version:
+   * - "nip17" (default): Gift-wrapped messages with metadata privacy
+   * - "nip04": Legacy encrypted DMs (metadata visible to relays)
+   */
+  dmProtocol?: "nip17" | "nip04";
   /** Called when a DM is received */
   onMessage: (
     pubkey: string,
@@ -266,7 +275,7 @@ function createRelayHealthTracker(): RelayHealthTracker {
     },
 
     getSortedRelays(relays: string[]): string[] {
-      return [...relays].toSorted((a, b) => this.getScore(b) - this.getScore(a));
+      return [...relays].sort((a, b) => this.getScore(b) - this.getScore(a));
     },
   };
 }
@@ -322,6 +331,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
   const {
     privateKey,
     relays = DEFAULT_RELAYS,
+    dmProtocol = "nip17",
     onMessage,
     onError,
     onEose,
@@ -329,12 +339,21 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     maxSeenEntries = 100_000,
     seenTtlMs = 60 * 60 * 1000,
   } = options;
+  
+  const useNip17 = dmProtocol === "nip17";
 
   const sk = validatePrivateKey(privateKey);
   const pk = getPublicKey(sk);
   const pool = new SimplePool();
   const accountId = options.accountId ?? pk.slice(0, 16);
   const gatewayStartedAt = Math.floor(Date.now() / 1000);
+
+  // NIP-42 auth handler for relays that require authentication
+  // Note: Full integration requires handling "auth-required" errors from relays
+  // and sending AUTH events. SimplePool doesn't directly expose this, so auth
+  // is best-effort. Relays that strictly require auth may need manual setup.
+  const authHandler = createAuthHandler(sk);
+  void authHandler; // Suppress unused warning until full integration
 
   // Initialize metrics
   const metrics = onMetric ? createMetrics(onMetric) : createNoopMetrics();
@@ -410,12 +429,6 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       }
       inflight.add(event.id);
 
-      // Self-message loop prevention: skip our own messages
-      if (event.pubkey === pk) {
-        metrics.emit("event.rejected.self_message");
-        return;
-      }
-
       // Skip events older than our `since` (relay may ignore filter)
       if (event.created_at < since) {
         metrics.emit("event.rejected.stale");
@@ -436,9 +449,18 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       }
 
       // Verify signature (must pass before we trust the event)
+      // Note: For NIP-17, this verifies the gift wrap, not the inner message
       if (!verifyEvent(event)) {
         metrics.emit("event.rejected.invalid_signature");
         onError?.(new Error("Invalid signature"), `event ${event.id}`);
+        return;
+      }
+      
+      // Self-message loop prevention
+      // For NIP-04: check event.pubkey
+      // For NIP-17: check after unwrapping (sender is inside the gift wrap)
+      if (!useNip17 && event.pubkey === pk) {
+        metrics.emit("event.rejected.self_message");
         return;
       }
 
@@ -446,16 +468,47 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       seen.add(event.id);
       metrics.emit("memory.seen_tracker_size", seen.size());
 
-      // Decrypt the message
+      // Decrypt the message based on protocol
       let plaintext: string;
-      try {
-        plaintext = decrypt(sk, event.pubkey, event.content);
-        metrics.emit("decrypt.success");
-      } catch (err) {
-        metrics.emit("decrypt.failure");
-        metrics.emit("event.rejected.decrypt_failed");
-        onError?.(err as Error, `decrypt from ${event.pubkey}`);
-        return;
+      let senderPubkey: string;
+      
+      if (useNip17 && event.kind === 1059) {
+        // NIP-17 gift-wrapped message
+        try {
+          const unwrapped = unwrapGiftWrap(event, sk);
+          if (!unwrapped) {
+            metrics.emit("decrypt.failure");
+            metrics.emit("event.rejected.decrypt_failed");
+            return;
+          }
+          plaintext = unwrapped.content;
+          senderPubkey = unwrapped.senderPubkey;
+          
+          // Self-message check for NIP-17 (after unwrapping)
+          if (senderPubkey === pk) {
+            metrics.emit("event.rejected.self_message");
+            return;
+          }
+          
+          metrics.emit("decrypt.success");
+        } catch (err) {
+          metrics.emit("decrypt.failure");
+          metrics.emit("event.rejected.decrypt_failed");
+          onError?.(err as Error, `unwrap gift wrap ${event.id}`);
+          return;
+        }
+      } else {
+        // NIP-04 legacy encrypted DM
+        senderPubkey = event.pubkey;
+        try {
+          plaintext = nip04Decrypt(sk, event.pubkey, event.content);
+          metrics.emit("decrypt.success");
+        } catch (err) {
+          metrics.emit("decrypt.failure");
+          metrics.emit("event.rejected.decrypt_failed");
+          onError?.(err as Error, `decrypt from ${event.pubkey}`);
+          return;
+        }
       }
 
       // Create reply function (try relays by health score)
@@ -463,9 +516,10 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
         await sendEncryptedDm(
           pool,
           sk,
-          event.pubkey,
+          senderPubkey,
           text,
           relays,
+          useNip17,
           metrics,
           circuitBreakers,
           healthTracker,
@@ -474,7 +528,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       };
 
       // Call the message handler
-      await onMessage(event.pubkey, plaintext, replyTo);
+      await onMessage(senderPubkey, plaintext, replyTo);
 
       // Mark as processed
       metrics.emit("event.processed");
@@ -488,7 +542,13 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     }
   }
 
-  const sub = pool.subscribeMany(relays, [{ kinds: [4], "#p": [pk], since }], {
+  // Subscribe to DMs based on protocol
+  // NIP-17: kind 1059 (gift wrap) - sender is hidden, we're in the p-tag
+  // NIP-04: kind 4 (encrypted DM) - we're in the p-tag
+  const dmKinds = useNip17 ? [1059] : [4];
+  
+  const dmFilter = { kinds: dmKinds, "#p": [pk], since };
+  const sub = pool.subscribeMany(relays, [dmFilter] as import("nostr-tools").Filter[], {
     onevent: handleEvent,
     oneose: () => {
       // EOSE handler - called when all stored events have been received
@@ -515,6 +575,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       toPubkey,
       text,
       relays,
+      useNip17,
       metrics,
       circuitBreakers,
       healthTracker,
@@ -590,31 +651,62 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 
 /**
  * Send an encrypted DM to a pubkey
+ * 
+ * Uses NIP-65 to discover recipient's preferred relays before sending.
  */
 async function sendEncryptedDm(
   pool: SimplePool,
   sk: Uint8Array,
   toPubkey: string,
   text: string,
-  relays: string[],
+  configuredRelays: string[],
+  useNip17: boolean,
   metrics: NostrMetrics,
   circuitBreakers: Map<string, CircuitBreaker>,
   healthTracker: RelayHealthTracker,
   onError?: (error: Error, context: string) => void,
 ): Promise<void> {
-  const ciphertext = encrypt(sk, toPubkey, text);
-  const reply = finalizeEvent(
-    {
-      kind: 4,
-      content: ciphertext,
-      tags: [["p", toPubkey]],
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    sk,
-  );
+  // NIP-65: Discover recipient's preferred relays
+  let relays: string[];
+  try {
+    relays = await getRelaysForDm(toPubkey, configuredRelays, pool);
+    // Relay discovery completed (relays found: ${relays.length})
+  } catch (err) {
+    // Fall back to configured relays on discovery error
+    relays = configuredRelays;
+    onError?.(err as Error, "NIP-65 relay discovery");
+  }
+
+  // Create the DM event based on protocol
+  let dmEvent: Event;
+  
+  if (useNip17) {
+    // NIP-17: Gift-wrapped message
+    const { event } = createGiftWrap(toPubkey, text, sk);
+    dmEvent = event;
+  } else {
+    // NIP-04: Legacy encrypted DM
+    const ciphertext = nip04Encrypt(sk, toPubkey, text);
+    dmEvent = finalizeEvent(
+      {
+        kind: 4,
+        content: ciphertext,
+        tags: [["p", toPubkey]],
+        created_at: Math.floor(Date.now() / 1000),
+      },
+      sk,
+    );
+  }
 
   // Sort relays by health score (best first)
   const sortedRelays = healthTracker.getSortedRelays(relays);
+
+  // Ensure circuit breakers exist for discovered relays
+  for (const relay of sortedRelays) {
+    if (!circuitBreakers.has(relay)) {
+      circuitBreakers.set(relay, createCircuitBreaker(relay, metrics));
+    }
+  }
 
   // Try relays in order of health, respecting circuit breakers
   let lastError: Error | undefined;
@@ -628,8 +720,8 @@ async function sendEncryptedDm(
 
     const startTime = Date.now();
     try {
-      // oxlint-disable-next-line typescript/await-thenable typesciript/no-floating-promises
-      await pool.publish([relay], reply);
+      // oxlint-disable-next-line typescript/await-thenable typescript/no-floating-promises
+      await pool.publish([relay], dmEvent);
       const latency = Date.now() - startTime;
 
       // Record success
@@ -693,8 +785,8 @@ export function normalizePubkey(input: string): string {
       throw new Error("Invalid npub key");
     }
     // Convert Uint8Array to hex string
-    return Array.from(decoded.data)
-      .map((b) => b.toString(16).padStart(2, "0"))
+    return Array.from(decoded.data as Uint8Array)
+      .map((b: number) => b.toString(16).padStart(2, "0"))
       .join("");
   }
 

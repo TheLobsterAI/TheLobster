@@ -72,6 +72,16 @@ export const NostrConfigSchema = z.object({
   /** WebSocket relay URLs to connect to */
   relays: z.array(z.string()).optional(),
 
+  /**
+   * DM protocol version:
+   * - "nip17" (default): Gift-wrapped messages with metadata privacy
+   * - "nip04": Legacy encrypted DMs (metadata visible to relays)
+   * 
+   * NIP-17 is recommended. Use NIP-04 only for backwards compatibility
+   * with very old clients that don't support NIP-17.
+   */
+  dmProtocol: z.enum(["nip17", "nip04"]).default("nip17").optional(),
+
   /** DM access policy: pairing, allowlist, open, or disabled */
   dmPolicy: z.enum(["pairing", "allowlist", "open", "disabled"]).optional(),
 
