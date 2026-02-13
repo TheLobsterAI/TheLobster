@@ -5,7 +5,12 @@ import { fetchDiscord } from "./api.js";
 import { normalizeDiscordSlug } from "./monitor/allow-list.js";
 import { normalizeDiscordToken } from "./token.js";
 
-type DiscordGuild = { id: string; name: string };
+type DiscordGuild = { id?: string; name?: string };
+
+function isDiscordGuildWithId(guild: DiscordGuild): guild is { id: string; name?: string } {
+  return typeof guild.id === "string";
+}
+
 type DiscordUser = { id: string; username: string; global_name?: string; bot?: boolean };
 type DiscordMember = { user: DiscordUser; nick?: string | null };
 type DiscordChannel = { id: string; name?: string | null };
@@ -28,7 +33,7 @@ export async function listDiscordDirectoryGroupsLive(
   }
   const query = normalizeQuery(params.query);
   const rawGuilds = await fetchDiscord<DiscordGuild[]>("/users/@me/guilds", token);
-  const guilds = rawGuilds.filter((g) => g.id && g.name);
+  const guilds = rawGuilds.filter(isDiscordGuildWithId);
   const rows: ChannelDirectoryEntry[] = [];
 
   for (const guild of guilds) {
@@ -71,7 +76,7 @@ export async function listDiscordDirectoryPeersLive(
   }
 
   const rawGuilds = await fetchDiscord<DiscordGuild[]>("/users/@me/guilds", token);
-  const guilds = rawGuilds.filter((g) => g.id && g.name);
+  const guilds = rawGuilds.filter(isDiscordGuildWithId);
   const rows: ChannelDirectoryEntry[] = [];
   const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : 25;
 

@@ -31,6 +31,32 @@ describe("resolveDiscordChannelAllowlist", () => {
     expect(res[0]?.channelId).toBe("c1");
   });
 
+  it("ignores partial guild entries", async () => {
+    const fetcher = async (url: string) => {
+      if (url.endsWith("/users/@me/guilds")) {
+        return jsonResponse([
+          { id: "g1", name: "Guild One" },
+          { id: "g2" },
+          { name: "Missing ID" },
+        ]);
+      }
+      if (url.endsWith("/guilds/g1/channels")) {
+        return jsonResponse([{ id: "c1", name: "general", guild_id: "g1", type: 0 }]);
+      }
+      return new Response("not found", { status: 404 });
+    };
+
+    const res = await resolveDiscordChannelAllowlist({
+      token: "test",
+      entries: ["Guild One/general"],
+      fetcher,
+    });
+
+    expect(res[0]?.resolved).toBe(true);
+    expect(res[0]?.guildId).toBe("g1");
+    expect(res[0]?.channelId).toBe("c1");
+  });
+
   it("resolves channel id to guild", async () => {
     const fetcher = async (url: string) => {
       if (url.endsWith("/users/@me/guilds")) {
