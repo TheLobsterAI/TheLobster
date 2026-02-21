@@ -44,6 +44,29 @@ function resolveAccount(params: BlueBubblesChatOpts) {
   return resolveBlueBubblesServerAccount(params);
 }
 
+const MAX_HISTORY_FETCH_LIMIT = 100;
+const HISTORY_SCAN_MULTIPLIER = 8;
+const MAX_HISTORY_SCAN_MESSAGES = 500;
+const MAX_HISTORY_BODY_CHARS = 2_000;
+
+function clampHistoryLimit(limit: number): number {
+  if (!Number.isFinite(limit)) {
+    return 0;
+  }
+  const normalized = Math.floor(limit);
+  if (normalized <= 0) {
+    return 0;
+  }
+  return Math.min(normalized, MAX_HISTORY_FETCH_LIMIT);
+}
+
+function truncateHistoryBody(text: string): string {
+  if (text.length <= MAX_HISTORY_BODY_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MAX_HISTORY_BODY_CHARS).trimEnd()}...`;
+}
+
 /**
  * Fetch message history from BlueBubbles API for a specific chat.
  * This provides the initial backfill for both group chats and DMs.
@@ -53,7 +76,8 @@ export async function fetchBlueBubblesHistory(
   limit: number,
   opts: BlueBubblesChatOpts = {},
 ): Promise<BlueBubblesHistoryFetchResult> {
-  if (!chatIdentifier.trim() || limit <= 0) {
+  const effectiveLimit = clampHistoryLimit(limit);
+  if (!chatIdentifier.trim() || effectiveLimit <= 0) {
     return { entries: [], resolved: true };
   }
 
@@ -67,9 +91,9 @@ export async function fetchBlueBubblesHistory(
 
   // Try different common API patterns for fetching messages
   const possiblePaths = [
-    `/api/v1/chat/${encodeURIComponent(chatIdentifier)}/messages?limit=${limit}&sort=DESC`,
-    `/api/v1/messages?chatGuid=${encodeURIComponent(chatIdentifier)}&limit=${limit}`,
-    `/api/v1/chat/${encodeURIComponent(chatIdentifier)}/message?limit=${limit}`,
+    `/api/v1/chat/${encodeURIComponent(chatIdentifier)}/messages?limit=${effectiveLimit}&sort=DESC`,
+    `/api/v1/messages?chatGuid=${encodeURIComponent(chatIdentifier)}&limit=${effectiveLimit}`,
+    `/api/v1/chat/${encodeURIComponent(chatIdentifier)}/message?limit=${effectiveLimit}`,
   ];
 
   for (const path of possiblePaths) {
@@ -104,7 +128,12 @@ export async function fetchBlueBubblesHistory(
 
       const historyEntries: BlueBubblesHistoryEntry[] = [];
 
-      for (const item of messages) {
+      const maxScannedMessages = Math.min(
+        Math.max(effectiveLimit * HISTORY_SCAN_MULTIPLIER, effectiveLimit),
+        MAX_HISTORY_SCAN_MESSAGES,
+      );
+      for (let i = 0; i < messages.length && i < maxScannedMessages; i++) {
+        const item = messages[i];
         const msg = item as BlueBubblesMessageData;
 
         // Skip messages without text content
@@ -120,7 +149,7 @@ export async function fetchBlueBubblesHistory(
 
         historyEntries.push({
           sender,
-          body: text,
+          body: truncateHistoryBody(text),
           timestamp,
           messageId: msg.guid,
         });
@@ -134,7 +163,7 @@ export async function fetchBlueBubblesHistory(
       });
 
       return {
-        entries: historyEntries.slice(0, limit), // Ensure we don't exceed the requested limit
+        entries: historyEntries.slice(0, effectiveLimit), // Ensure we don't exceed the requested limit
         resolved: true,
       };
     } catch (error) {

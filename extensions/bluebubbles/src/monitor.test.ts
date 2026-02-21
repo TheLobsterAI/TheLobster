@@ -3029,7 +3029,7 @@ describe("BlueBubbles webhook monitor", () => {
       expect(inboundHistory.filter((entry) => entry.body === "current text")).toHaveLength(1);
     });
 
-    it("retries unresolved backfill and stops retrying after a resolved fetch", async () => {
+    it("uses exponential backoff for unresolved backfill and stops after resolve", async () => {
       mockFetchBlueBubblesHistory
         .mockResolvedValueOnce({ resolved: false, entries: [] })
         .mockResolvedValueOnce({
@@ -3039,7 +3039,7 @@ describe("BlueBubbles webhook monitor", () => {
           ],
         });
 
-      const account = createMockAccount({ dmHistoryLimit: 3 });
+      const account = createMockAccount({ dmHistoryLimit: 4 });
       const config: OpenClawConfig = {};
       const core = createMockRuntime();
       setBlueBubblesRuntime(core);
@@ -3052,7 +3052,7 @@ describe("BlueBubbles webhook monitor", () => {
         path: "/bluebubbles-webhook",
       });
 
-      const mkPayload = (guid: string, text: string) => ({
+      const mkPayload = (guid: string, text: string, now: number) => ({
         type: "new-message",
         data: {
           text,
@@ -3061,35 +3061,101 @@ describe("BlueBubbles webhook monitor", () => {
           isFromMe: false,
           guid,
           chatGuid: "iMessage;-;+15550003003",
-          date: Date.now(),
+          date: now,
         },
       });
 
+      let now = 1_700_000_000_000;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        await handleBlueBubblesWebhookRequest(
+          createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-1", "first text", now)),
+          createMockResponse(),
+        );
+        await flushAsync();
+        expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(1);
+
+        now += 1_000;
+        await handleBlueBubblesWebhookRequest(
+          createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-2", "second text", now)),
+          createMockResponse(),
+        );
+        await flushAsync();
+        expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(1);
+
+        now += 6_000;
+        await handleBlueBubblesWebhookRequest(
+          createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-3", "third text", now)),
+          createMockResponse(),
+        );
+        await flushAsync();
+        expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(2);
+
+        const thirdCall = mockDispatchReplyWithBufferedBlockDispatcher.mock.calls[2]?.[0];
+        const thirdHistory = (thirdCall?.ctx.InboundHistory ?? []) as Array<{ body: string }>;
+        expect(thirdHistory.map((entry) => entry.body)).toContain("older context");
+        expect(thirdHistory.map((entry) => entry.body)).toContain("third text");
+
+        now += 10_000;
+        await handleBlueBubblesWebhookRequest(
+          createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-4", "fourth text", now)),
+          createMockResponse(),
+        );
+        await flushAsync();
+        expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(2);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it("caps inbound history payload size to reduce prompt-bomb risk", async () => {
+      const huge = "x".repeat(8_000);
+      mockFetchBlueBubblesHistory.mockResolvedValueOnce({
+        resolved: true,
+        entries: Array.from({ length: 20 }, (_, idx) => ({
+          sender: `Friend ${idx}`,
+          body: `${huge} ${idx}`,
+          messageId: `hist-${idx}`,
+          timestamp: idx + 1,
+        })),
+      });
+
+      const account = createMockAccount({ dmHistoryLimit: 20 });
+      const config: OpenClawConfig = {};
+      const core = createMockRuntime();
+      setBlueBubblesRuntime(core);
+
+      unregister = registerBlueBubblesWebhookTarget({
+        account,
+        config,
+        runtime: { log: vi.fn(), error: vi.fn() },
+        core,
+        path: "/bluebubbles-webhook",
+      });
+
       await handleBlueBubblesWebhookRequest(
-        createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-1", "first text")),
+        createMockRequest("POST", "/bluebubbles-webhook", {
+          type: "new-message",
+          data: {
+            text: "latest text",
+            handle: { address: "+15551234567" },
+            isGroup: false,
+            isFromMe: false,
+            guid: "msg-bomb-1",
+            chatGuid: "iMessage;-;+15550004004",
+            date: Date.now(),
+          },
+        }),
         createMockResponse(),
       );
       await flushAsync();
-      expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(1);
 
-      await handleBlueBubblesWebhookRequest(
-        createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-2", "second text")),
-        createMockResponse(),
-      );
-      await flushAsync();
-      expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(2);
-
-      const secondCall = mockDispatchReplyWithBufferedBlockDispatcher.mock.calls[1]?.[0];
-      const secondHistory = (secondCall?.ctx.InboundHistory ?? []) as Array<{ body: string }>;
-      expect(secondHistory.map((entry) => entry.body)).toContain("older context");
-      expect(secondHistory.map((entry) => entry.body)).toContain("second text");
-
-      await handleBlueBubblesWebhookRequest(
-        createMockRequest("POST", "/bluebubbles-webhook", mkPayload("msg-3", "third text")),
-        createMockResponse(),
-      );
-      await flushAsync();
-      expect(mockFetchBlueBubblesHistory).toHaveBeenCalledTimes(2);
+      const callArgs = getFirstDispatchCall();
+      const inboundHistory = (callArgs.ctx.InboundHistory ?? []) as Array<{ body: string }>;
+      const totalChars = inboundHistory.reduce((sum, entry) => sum + entry.body.length, 0);
+      expect(inboundHistory.length).toBeLessThan(20);
+      expect(totalChars).toBeLessThanOrEqual(12_000);
+      expect(inboundHistory.every((entry) => entry.body.length <= 1_203)).toBe(true);
     });
   });
 
