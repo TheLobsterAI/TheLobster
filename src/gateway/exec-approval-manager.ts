@@ -27,6 +27,8 @@ export type ExecApprovalRecord = {
   resolvedAtMs?: number;
   decision?: ExecApprovalDecision;
   resolvedBy?: string | null;
+  resolvedByDeviceId?: string | null;
+  resolvedByClientId?: string | null;
 };
 
 type PendingEntry = {
@@ -90,6 +92,8 @@ export class ExecApprovalManager {
       record.resolvedAtMs = Date.now();
       record.decision = undefined;
       record.resolvedBy = null;
+      record.resolvedByDeviceId = null;
+      record.resolvedByClientId = null;
       resolvePromise(null);
       // Keep entry briefly for in-flight awaitDecision calls
       setTimeout(() => {
@@ -113,7 +117,18 @@ export class ExecApprovalManager {
     return this.register(record, timeoutMs);
   }
 
-  resolve(recordId: string, decision: ExecApprovalDecision, resolvedBy?: string | null): boolean {
+  resolve(
+    recordId: string,
+    decision: ExecApprovalDecision,
+    resolvedBy?:
+      | string
+      | null
+      | {
+          resolvedBy?: string | null;
+          resolvedByDeviceId?: string | null;
+          resolvedByClientId?: string | null;
+        },
+  ): boolean {
     const pending = this.pending.get(recordId);
     if (!pending) {
       return false;
@@ -125,7 +140,20 @@ export class ExecApprovalManager {
     clearTimeout(pending.timer);
     pending.record.resolvedAtMs = Date.now();
     pending.record.decision = decision;
-    pending.record.resolvedBy = resolvedBy ?? null;
+    if (typeof resolvedBy === "object" && resolvedBy !== null) {
+      const resolution = resolvedBy as {
+        resolvedBy?: string | null;
+        resolvedByDeviceId?: string | null;
+        resolvedByClientId?: string | null;
+      };
+      pending.record.resolvedBy = resolution.resolvedBy ?? null;
+      pending.record.resolvedByDeviceId = resolution.resolvedByDeviceId ?? null;
+      pending.record.resolvedByClientId = resolution.resolvedByClientId ?? null;
+    } else {
+      pending.record.resolvedBy = resolvedBy ?? null;
+      pending.record.resolvedByDeviceId = null;
+      pending.record.resolvedByClientId = null;
+    }
     // Resolve the promise first, then delete after a grace period.
     // This allows in-flight awaitDecision calls to find the resolved entry.
     pending.resolve(decision);

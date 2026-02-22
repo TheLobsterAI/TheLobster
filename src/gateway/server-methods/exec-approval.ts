@@ -1,8 +1,14 @@
+import { loadConfig } from "../../config/config.js";
 import type { ExecApprovalForwarder } from "../../infra/exec-approval-forwarder.js";
 import {
   DEFAULT_EXEC_APPROVAL_TIMEOUT_MS,
   type ExecApprovalDecision,
 } from "../../infra/exec-approvals.js";
+import {
+  buildExecTrustAction,
+  recordTrustApprovalEvent,
+  resolveTrustRuntimeConfig,
+} from "../../trust/runtime.js";
 import type { ExecApprovalManager } from "../exec-approval-manager.js";
 import {
   ErrorCodes,
@@ -12,6 +18,32 @@ import {
   validateExecApprovalResolveParams,
 } from "../protocol/index.js";
 import type { GatewayRequestHandlers } from "./types.js";
+
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeOptionalString(value);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
 
 export function createExecApprovalHandlers(
   manager: ExecApprovalManager,
@@ -123,6 +155,7 @@ export function createExecApprovalHandlers(
       }
 
       const decision = await decisionPromise;
+      const resolved = manager.getSnapshot(record.id);
       // Send final response with decision for callers using expectFinal:true.
       respond(
         true,
@@ -131,6 +164,9 @@ export function createExecApprovalHandlers(
           decision,
           createdAtMs: record.createdAtMs,
           expiresAtMs: record.expiresAtMs,
+          resolvedBy: resolved?.resolvedBy ?? null,
+          resolvedByDeviceId: resolved?.resolvedByDeviceId ?? null,
+          resolvedByClientId: resolved?.resolvedByClientId ?? null,
         },
         undefined,
       );
@@ -162,6 +198,9 @@ export function createExecApprovalHandlers(
           decision,
           createdAtMs: snapshot?.createdAtMs,
           expiresAtMs: snapshot?.expiresAtMs,
+          resolvedBy: snapshot?.resolvedBy ?? null,
+          resolvedByDeviceId: snapshot?.resolvedByDeviceId ?? null,
+          resolvedByClientId: snapshot?.resolvedByClientId ?? null,
         },
         undefined,
       );
@@ -186,19 +225,85 @@ export function createExecApprovalHandlers(
         respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "invalid decision"));
         return;
       }
-      const resolvedBy = client?.connect?.client?.displayName ?? client?.connect?.client?.id;
-      const ok = manager.resolve(p.id, decision, resolvedBy ?? null);
+      const resolvedBy =
+        normalizeOptionalString(client?.connect?.client?.displayName) ??
+        normalizeOptionalString(client?.connect?.client?.id);
+      const resolvedByDeviceId = normalizeOptionalString(client?.connect?.device?.id);
+      const resolvedByClientId = normalizeOptionalString(client?.connect?.client?.id);
+      const ok = manager.resolve(p.id, decision, {
+        resolvedBy,
+        resolvedByDeviceId,
+        resolvedByClientId,
+      });
       if (!ok) {
         respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown approval id"));
         return;
       }
+      const snapshot = manager.getSnapshot(p.id);
+      const approvers = uniqueNonEmpty([resolvedByDeviceId, resolvedByClientId, resolvedBy]);
+      if (snapshot) {
+        try {
+          const cfg = loadConfig();
+          const runtime = resolveTrustRuntimeConfig({ cfg, trustConfig: cfg.trust });
+          const action = buildExecTrustAction({
+            runtime,
+            command: snapshot.request.command,
+            stage: "proposal",
+            host: snapshot.request.host === "node" ? "node" : "gateway",
+            workdir: snapshot.request.cwd?.trim() || process.cwd(),
+            actorId:
+              snapshot.request.agentId?.trim() ||
+              snapshot.request.sessionKey?.trim() ||
+              snapshot.requestedByDeviceId ||
+              snapshot.requestedByClientId ||
+              p.id,
+            actorType: snapshot.request.sessionKey ? "human" : "agent",
+            sessionId: snapshot.request.sessionKey?.trim() || snapshot.requestedByClientId || p.id,
+            channel: "gateway-rpc",
+            audience: "operator",
+          });
+          void recordTrustApprovalEvent({
+            cfg,
+            trustConfig: cfg.trust,
+            action,
+            approvalId: p.id,
+            decision,
+            resolvedBy,
+            approvers,
+            scope: decision === "allow-always" ? "policy" : "once",
+          }).catch((err) => {
+            context.logGateway?.error?.(
+              `trust: failed to record approval audit event: ${String(err)}`,
+            );
+          });
+        } catch (err) {
+          context.logGateway?.warn?.(
+            `trust: unable to load config for approval audit event: ${String(err)}`,
+          );
+        }
+      }
+      const ts = Date.now();
       context.broadcast(
         "exec.approval.resolved",
-        { id: p.id, decision, resolvedBy, ts: Date.now() },
+        {
+          id: p.id,
+          decision,
+          resolvedBy,
+          resolvedByDeviceId,
+          resolvedByClientId,
+          ts,
+        },
         { dropIfSlow: true },
       );
       void opts?.forwarder
-        ?.handleResolved({ id: p.id, decision, resolvedBy, ts: Date.now() })
+        ?.handleResolved({
+          id: p.id,
+          decision,
+          resolvedBy,
+          resolvedByDeviceId,
+          resolvedByClientId,
+          ts,
+        })
         .catch((err) => {
           context.logGateway?.error?.(`exec approvals: forward resolve failed: ${String(err)}`);
         });

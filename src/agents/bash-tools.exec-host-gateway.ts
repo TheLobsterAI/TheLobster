@@ -148,9 +148,9 @@ export async function processGatewayAllowlist(
     const warningText = params.warnings.length ? `${params.warnings.join("\n")}\n\n` : "";
 
     void (async () => {
-      let decision: string | null = null;
+      let approvalResult: Awaited<ReturnType<typeof requestExecApprovalDecision>>;
       try {
-        decision = await requestExecApprovalDecision({
+        approvalResult = await requestExecApprovalDecision({
           id: approvalId,
           command: params.command,
           cwd: params.workdir,
@@ -171,6 +171,11 @@ export async function processGatewayAllowlist(
         );
         return;
       }
+      const decision = approvalResult.decision;
+      const approvalApprovers =
+        approvalResult.approvers.length > 0
+          ? approvalResult.approvers
+          : [params.agentId ?? "approval-system"];
 
       let approvedByAsk = false;
       let deniedReason: string | null = null;
@@ -218,7 +223,8 @@ export async function processGatewayAllowlist(
           action: trustProposalAction,
           approvalId,
           decision,
-          approvers: [params.agentId ?? "approval-system"],
+          resolvedBy: approvalResult.resolvedBy,
+          approvers: approvalApprovers,
           scope: decision === "allow-always" ? "policy" : "once",
         }).catch(() => undefined);
       }
@@ -268,7 +274,7 @@ export async function processGatewayAllowlist(
             buildSyntheticApprovalGrant({
               action: trustExecutionAction,
               approvalId,
-              approvers: [params.agentId ?? "approval-system"],
+              approvers: approvalApprovers,
               scope: decision === "allow-always" ? "policy" : "once",
             }),
           ]

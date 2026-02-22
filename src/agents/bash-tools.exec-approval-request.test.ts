@@ -22,7 +22,12 @@ describe("requestExecApprovalDecision", () => {
   });
 
   it("returns string decisions", async () => {
-    vi.mocked(callGatewayTool).mockResolvedValue({ decision: "allow-once" });
+    vi.mocked(callGatewayTool).mockResolvedValue({
+      decision: "allow-once",
+      resolvedBy: "Operator",
+      resolvedByDeviceId: "device-1",
+      resolvedByClientId: "client-1",
+    });
 
     const result = await requestExecApprovalDecision({
       id: "approval-id",
@@ -36,7 +41,13 @@ describe("requestExecApprovalDecision", () => {
       sessionKey: "session",
     });
 
-    expect(result).toBe("allow-once");
+    expect(result).toEqual({
+      decision: "allow-once",
+      resolvedBy: "Operator",
+      resolvedByDeviceId: "device-1",
+      resolvedByClientId: "client-1",
+      approvers: ["device-1", "client-1", "Operator"],
+    });
     expect(callGatewayTool).toHaveBeenCalledWith(
       "exec.approval.request",
       { timeoutMs: DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS },
@@ -66,7 +77,13 @@ describe("requestExecApprovalDecision", () => {
         security: "allowlist",
         ask: "on-miss",
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({
+      decision: null,
+      resolvedBy: null,
+      resolvedByDeviceId: null,
+      resolvedByClientId: null,
+      approvers: [],
+    });
 
     vi.mocked(callGatewayTool).mockResolvedValueOnce({ decision: 123 });
     await expect(
@@ -78,6 +95,38 @@ describe("requestExecApprovalDecision", () => {
         security: "allowlist",
         ask: "on-miss",
       }),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({
+      decision: null,
+      resolvedBy: null,
+      resolvedByDeviceId: null,
+      resolvedByClientId: null,
+      approvers: [],
+    });
+  });
+
+  it("normalizes approver metadata", async () => {
+    vi.mocked(callGatewayTool).mockResolvedValue({
+      decision: "allow-always",
+      resolvedBy: "  operator-1  ",
+      resolvedByDeviceId: "Device-1",
+      resolvedByClientId: "device-1",
+    });
+
+    await expect(
+      requestExecApprovalDecision({
+        id: "approval-id-3",
+        command: "echo hi",
+        cwd: "/tmp",
+        host: "node",
+        security: "allowlist",
+        ask: "on-miss",
+      }),
+    ).resolves.toEqual({
+      decision: "allow-always",
+      resolvedBy: "operator-1",
+      resolvedByDeviceId: "Device-1",
+      resolvedByClientId: "device-1",
+      approvers: ["Device-1", "operator-1"],
+    });
   });
 });

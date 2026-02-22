@@ -289,12 +289,17 @@ describe("exec approval handlers", () => {
     id: string;
     respond: ReturnType<typeof vi.fn>;
     context: { broadcast: (event: string, payload: unknown) => void };
+    client?: ExecApprovalResolveArgs["client"];
+    decision?: "allow-once" | "allow-always" | "deny";
   }) {
     return params.handlers["exec.approval.resolve"]({
-      params: { id: params.id, decision: "allow-once" } as ExecApprovalResolveArgs["params"],
+      params: {
+        id: params.id,
+        decision: params.decision ?? "allow-once",
+      } as ExecApprovalResolveArgs["params"],
       respond: params.respond as unknown as ExecApprovalResolveArgs["respond"],
       context: toExecApprovalResolveContext(params.context),
-      client: null,
+      client: params.client ?? null,
       req: { id: "req-2", type: "req", method: "exec.approval.resolve" },
       isWebchatConnect: execApprovalNoop,
     });
@@ -392,6 +397,63 @@ describe("exec approval handlers", () => {
       undefined,
     );
     expect(broadcasts.some((entry) => entry.event === "exec.approval.resolved")).toBe(true);
+  });
+
+  it("returns resolver identity metadata in decision payloads and broadcast", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: { twoPhase: true },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    expect(requested).toBeTruthy();
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    expect(id).not.toBe("");
+
+    const resolveRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      respond: resolveRespond,
+      context,
+      client: {
+        connect: {
+          client: { id: "client-1", displayName: "Operator One" },
+          device: { id: "device-1" },
+        },
+      } as ExecApprovalResolveArgs["client"],
+    });
+
+    await requestPromise;
+
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        id,
+        decision: "allow-once",
+        resolvedBy: "Operator One",
+        resolvedByDeviceId: "device-1",
+        resolvedByClientId: "client-1",
+      }),
+      undefined,
+    );
+
+    const resolved = broadcasts.find((entry) => entry.event === "exec.approval.resolved");
+    expect(resolved).toBeTruthy();
+    expect(resolved?.payload).toEqual(
+      expect.objectContaining({
+        id,
+        decision: "allow-once",
+        resolvedBy: "Operator One",
+        resolvedByDeviceId: "device-1",
+        resolvedByClientId: "client-1",
+      }),
+    );
+    expect(resolveRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
   });
 
   it("accepts resolve during broadcast", async () => {

@@ -31,6 +31,8 @@ export type ExecApprovalResolved = {
   id: string;
   decision: ExecApprovalDecision;
   resolvedBy?: string | null;
+  resolvedByDeviceId?: string | null;
+  resolvedByClientId?: string | null;
   ts: number;
 };
 

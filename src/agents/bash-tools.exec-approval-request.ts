@@ -5,6 +5,16 @@ import {
 } from "./bash-tools.exec-runtime.js";
 import { callGatewayTool } from "./tools/gateway.js";
 
+export type ExecApprovalDecisionValue = "allow-once" | "allow-always" | "deny";
+
+export type ExecApprovalDecisionResult = {
+  decision: ExecApprovalDecisionValue | null;
+  resolvedBy: string | null;
+  resolvedByDeviceId: string | null;
+  resolvedByClientId: string | null;
+  approvers: string[];
+};
+
 export type RequestExecApprovalDecisionParams = {
   id: string;
   command: string;
@@ -17,10 +27,48 @@ export type RequestExecApprovalDecisionParams = {
   sessionKey?: string;
 };
 
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeDecision(value: unknown): ExecApprovalDecisionValue | null {
+  if (value === "allow-once" || value === "allow-always" || value === "deny") {
+    return value;
+  }
+  return null;
+}
+
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeOptionalString(value);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
 export async function requestExecApprovalDecision(
   params: RequestExecApprovalDecisionParams,
-): Promise<string | null> {
-  const decisionResult = await callGatewayTool<{ decision: string }>(
+): Promise<ExecApprovalDecisionResult> {
+  const decisionResult = await callGatewayTool<{
+    decision?: unknown;
+    resolvedBy?: unknown;
+    resolvedByDeviceId?: unknown;
+    resolvedByClientId?: unknown;
+  }>(
     "exec.approval.request",
     { timeoutMs: DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS },
     {
@@ -36,9 +84,25 @@ export async function requestExecApprovalDecision(
       timeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
     },
   );
-  const decisionValue =
+
+  const payload =
     decisionResult && typeof decisionResult === "object"
-      ? (decisionResult as { decision?: unknown }).decision
-      : undefined;
-  return typeof decisionValue === "string" ? decisionValue : null;
+      ? (decisionResult as {
+          decision?: unknown;
+          resolvedBy?: unknown;
+          resolvedByDeviceId?: unknown;
+          resolvedByClientId?: unknown;
+        })
+      : {};
+
+  const resolvedBy = normalizeOptionalString(payload.resolvedBy);
+  const resolvedByDeviceId = normalizeOptionalString(payload.resolvedByDeviceId);
+  const resolvedByClientId = normalizeOptionalString(payload.resolvedByClientId);
+  return {
+    decision: normalizeDecision(payload.decision),
+    resolvedBy,
+    resolvedByDeviceId,
+    resolvedByClientId,
+    approvers: uniqueNonEmpty([resolvedByDeviceId, resolvedByClientId, resolvedBy]),
+  };
 }
