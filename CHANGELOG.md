@@ -33,6 +33,7 @@ Docs: https://docs.openclaw.ai
 ### Fixes
 
 - Config/Memory: allow `"mistral"` in `agents.defaults.memorySearch.provider` and `agents.defaults.memorySearch.fallback` schema validation. (#14934) Thanks @ThomsenDrake.
+- Memory/Mistral: align schema/runtime support by adding Mistral embeddings (`/v1/embeddings`, default `mistral-embed`) for memory search provider resolution/fallback/doctor checks, and refresh onboarding Mistral model metadata for `mistral-large-latest` context/output limits. Thanks @jaimegh-es and @JamesEBall.
 - Security/Feishu: enforce ID-only allowlist matching for DM/group sender authorization, normalize Feishu ID prefixes during checks, and ignore mutable display names so display-name collisions cannot satisfy allowlist entries. This ships in the next npm release. Thanks @jiseoung for reporting.
 - Feishu/Commands: in group chats, command authorization now falls back to top-level `channels.feishu.allowFrom` when per-group `allowFrom` is not set, so `/command` no longer gets blocked by an unintended empty allowlist. (#23756)
 - Feishu/Plugins: restore bundled Feishu SDK availability for global installs and strip `openclaw: workspace:*` from plugin `devDependencies` during plugin-version sync so npm-installed Feishu plugins do not fail dependency install. (#23611, #23645, #23603)
