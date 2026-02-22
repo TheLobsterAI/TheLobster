@@ -1275,6 +1275,10 @@ describe("resolvePreferredProviderForAuthChoice", () => {
     expect(resolvePreferredProviderForAuthChoice("qwen-portal")).toBe("qwen-portal");
   });
 
+  it("maps mistral-api-key to the provider", () => {
+    expect(resolvePreferredProviderForAuthChoice("mistral-api-key")).toBe("mistral");
+  });
+
   it("returns undefined for unknown choices", () => {
     expect(resolvePreferredProviderForAuthChoice("unknown" as AuthChoice)).toBeUndefined();
   });
