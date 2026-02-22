@@ -208,6 +208,7 @@ export async function setVeniceApiKey(key: string, agentDir?: string) {
 
 export const ZAI_DEFAULT_MODEL_REF = "zai/glm-5";
 export const XIAOMI_DEFAULT_MODEL_REF = "xiaomi/mimo-v2-flash";
+export const MISTRAL_DEFAULT_MODEL_REF = "mistral/mistral-large-latest";
 export const OPENROUTER_DEFAULT_MODEL_REF = "openrouter/auto";
 export const HUGGINGFACE_DEFAULT_MODEL_REF = "huggingface/deepseek-ai/DeepSeek-R1";
 export const TOGETHER_DEFAULT_MODEL_REF = "together/moonshotai/Kimi-K2.5";
@@ -355,6 +356,18 @@ export function setXaiApiKey(key: string, agentDir?: string) {
     credential: {
       type: "api_key",
       provider: "xai",
+      key,
+    },
+    agentDir: resolveAuthAgentDir(agentDir),
+  });
+}
+
+export async function setMistralApiKey(key: string, agentDir?: string) {
+  upsertAuthProfile({
+    profileId: "mistral:default",
+    credential: {
+      type: "api_key",
+      provider: "mistral",
       key,
     },
     agentDir: resolveAuthAgentDir(agentDir),
