@@ -13,6 +13,12 @@ import type {
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import type { TrustDataClassification } from "../../config/types.trust.js";
+import {
+  buildMessageTrustAction,
+  evaluateTrustGate,
+  resolveTrustRuntimeConfig,
+} from "../../trust/runtime.js";
 import {
   isDeliverableMessageChannel,
   normalizeMessageChannel,
@@ -103,6 +109,113 @@ export type RunMessageActionParams = {
   dryRun?: boolean;
   abortSignal?: AbortSignal;
 };
+
+const OUTBOUND_PLUGIN_ACTIONS = new Set<ChannelMessageActionName>([
+  "reply",
+  "sendWithEffect",
+  "sendAttachment",
+  "thread-reply",
+  "sticker",
+]);
+
+function resolveTrustDestinationTarget(params: {
+  action: ChannelMessageActionName;
+  args: Record<string, unknown>;
+  resolvedTarget?: ResolvedMessagingTarget;
+}): string {
+  if (params.resolvedTarget?.to) {
+    return params.resolvedTarget.to;
+  }
+  const to = typeof params.args.to === "string" ? params.args.to.trim() : "";
+  if (to) {
+    return to;
+  }
+  const channelId = typeof params.args.channelId === "string" ? params.args.channelId.trim() : "";
+  if (channelId) {
+    return channelId;
+  }
+  return `action:${params.action}`;
+}
+
+function resolveTrustDestinationKind(target: string): "none" | "chat" | "http" | "email" | "file" {
+  const normalized = target.trim().toLowerCase();
+  if (!normalized || normalized.startsWith("action:")) {
+    return "none";
+  }
+  if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
+    return "http";
+  }
+  if (normalized.startsWith("/") || normalized.startsWith("./") || normalized.startsWith("../")) {
+    return "file";
+  }
+  if (normalized.includes("@") && !normalized.endsWith("@g.us")) {
+    return "email";
+  }
+  return "chat";
+}
+
+function resolveTrustSourceDataClass(
+  args: Record<string, unknown>,
+): TrustDataClassification | undefined {
+  const explicitDataClass =
+    typeof args.dataClass === "string" ? args.dataClass.trim().toLowerCase() : "";
+  if (
+    explicitDataClass === "public" ||
+    explicitDataClass === "internal" ||
+    explicitDataClass === "confidential" ||
+    explicitDataClass === "restricted" ||
+    explicitDataClass === "secret"
+  ) {
+    return explicitDataClass;
+  }
+  return undefined;
+}
+
+async function enforceMessageActionTrust(params: {
+  cfg: OpenClawConfig;
+  action: ChannelMessageActionName;
+  stage: "proposal" | "execution" | "outbound";
+  channel: ChannelId;
+  args: Record<string, unknown>;
+  destinationTarget: string;
+  requesterSenderId?: string | null;
+  agentId?: string;
+  sessionKey?: string;
+}) {
+  const runtime = resolveTrustRuntimeConfig({ cfg: params.cfg });
+  const textPayload =
+    (typeof params.args.message === "string" ? params.args.message : undefined) ??
+    (typeof params.args.caption === "string" ? params.args.caption : undefined);
+  const mediaPayloads = [
+    typeof params.args.media === "string" ? params.args.media : undefined,
+    typeof params.args.path === "string" ? params.args.path : undefined,
+    typeof params.args.filePath === "string" ? params.args.filePath : undefined,
+  ].filter((entry): entry is string => Boolean(entry && entry.trim().length > 0));
+
+  const trustAction = buildMessageTrustAction({
+    runtime,
+    action: params.action,
+    stage: params.stage,
+    channel: params.channel,
+    destinationTarget: params.destinationTarget,
+    destinationKind: resolveTrustDestinationKind(params.destinationTarget),
+    textPayload,
+    filePayloads: mediaPayloads,
+    actorId: params.requesterSenderId ?? params.agentId ?? null,
+    actorType: params.requesterSenderId ? "human" : "agent",
+    sessionId: params.sessionKey,
+    sourceDataClass: resolveTrustSourceDataClass(params.args),
+    sourceSystem: "message-tool",
+    sourceResource: params.action,
+  });
+
+  const gate = await evaluateTrustGate({ cfg: params.cfg, action: trustAction });
+  if (gate.blocked) {
+    throw new Error(
+      `Trust policy denied ${params.action} ${params.stage}: ${gate.decision.reason}`,
+    );
+  }
+}
 
 export type MessageActionRunResult =
   | {
@@ -533,6 +646,14 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
               mediaUrls: mirrorMediaUrls,
             }
           : undefined,
+      trust: {
+        actorId: input.requesterSenderId ?? agentId ?? undefined,
+        actorType: input.requesterSenderId ? "human" : "agent",
+        sessionId: input.sessionKey,
+        sourceSystem: "message-tool",
+        sourceResource: action,
+        sourceDataClass: resolveTrustSourceDataClass(params),
+      },
       abortSignal,
       silent: silent ?? undefined,
     },
@@ -623,6 +744,14 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
       gateway,
       toolContext: input.toolContext,
       dryRun,
+      trust: {
+        actorId: input.requesterSenderId ?? undefined,
+        actorType: input.requesterSenderId ? "human" : "agent",
+        sessionId: input.sessionKey,
+        sourceSystem: "message-tool",
+        sourceResource: action,
+        sourceDataClass: resolveTrustSourceDataClass(params),
+      },
       silent: silent ?? undefined,
     },
     to,
@@ -797,6 +926,24 @@ export async function runMessageAction(
     cfg,
   });
 
+  const trustDestinationTarget = resolveTrustDestinationTarget({
+    action,
+    args: params,
+    resolvedTarget,
+  });
+
+  await enforceMessageActionTrust({
+    cfg,
+    action,
+    stage: "proposal",
+    channel,
+    args: params,
+    destinationTarget: trustDestinationTarget,
+    requesterSenderId: input.requesterSenderId,
+    agentId: resolvedAgentId,
+    sessionKey: input.sessionKey,
+  });
+
   const gateway = resolveGateway(input);
 
   if (action === "send") {
@@ -824,6 +971,32 @@ export async function runMessageAction(
       gateway,
       input,
       abortSignal: input.abortSignal,
+    });
+  }
+
+  await enforceMessageActionTrust({
+    cfg,
+    action,
+    stage: "execution",
+    channel,
+    args: params,
+    destinationTarget: trustDestinationTarget,
+    requesterSenderId: input.requesterSenderId,
+    agentId: resolvedAgentId,
+    sessionKey: input.sessionKey,
+  });
+
+  if (OUTBOUND_PLUGIN_ACTIONS.has(action)) {
+    await enforceMessageActionTrust({
+      cfg,
+      action,
+      stage: "outbound",
+      channel,
+      args: params,
+      destinationTarget: trustDestinationTarget,
+      requesterSenderId: input.requesterSenderId,
+      agentId: resolvedAgentId,
+      sessionKey: input.sessionKey,
     });
   }
 

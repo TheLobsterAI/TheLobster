@@ -111,6 +111,126 @@ const HttpUrlSchema = z
     return protocol === "http:" || protocol === "https:";
   }, "Expected http:// or https:// URL");
 
+const TrustRiskLevelSchema = z.union([
+  z.literal("low"),
+  z.literal("medium"),
+  z.literal("high"),
+  z.literal("critical"),
+  z.literal("unknown"),
+]);
+
+const TrustDataClassSchema = z.union([
+  z.literal("public"),
+  z.literal("internal"),
+  z.literal("confidential"),
+  z.literal("restricted"),
+  z.literal("secret"),
+]);
+
+const TrustDecisionSchema = z.union([z.literal("allow"), z.literal("deny"), z.literal("step-up")]);
+
+const TrustActorTypeSchema = z.union([
+  z.literal("human"),
+  z.literal("agent"),
+  z.literal("service"),
+]);
+
+const TrustDestinationKindSchema = z.union([
+  z.literal("none"),
+  z.literal("chat"),
+  z.literal("http"),
+  z.literal("email"),
+  z.literal("file"),
+  z.literal("connector"),
+  z.literal("tool"),
+]);
+
+const TrustPolicyMatchSchema = z
+  .object({
+    actorIds: z.array(z.string()).optional(),
+    actorTypes: z.array(TrustActorTypeSchema).optional(),
+    intents: z.array(z.string()).optional(),
+    operations: z.array(z.string()).optional(),
+    channels: z.array(z.string()).optional(),
+    audiences: z.array(z.string()).optional(),
+    sourceDataClasses: z.array(TrustDataClassSchema).optional(),
+    destinationKinds: z.array(TrustDestinationKindSchema).optional(),
+    destinationTargets: z.array(z.string()).optional(),
+    riskLevels: z.array(TrustRiskLevelSchema).optional(),
+  })
+  .strict();
+
+const TrustPolicyRuleSchema = z
+  .object({
+    id: z.string(),
+    effect: TrustDecisionSchema,
+    reason: z.string(),
+    priority: z.number().int().optional(),
+    dualControl: z.boolean().optional(),
+    match: TrustPolicyMatchSchema.optional(),
+  })
+  .strict();
+
+const TrustLayerRulesSchema = z
+  .object({
+    org: z.array(TrustPolicyRuleSchema).optional(),
+    team: z.array(TrustPolicyRuleSchema).optional(),
+    app: z.array(TrustPolicyRuleSchema).optional(),
+    user: z.array(TrustPolicyRuleSchema).optional(),
+    runtime: z.array(TrustPolicyRuleSchema).optional(),
+  })
+  .strict();
+
+const TrustSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    mode: z.union([z.literal("enforce"), z.literal("simulate")]).optional(),
+    tenantId: z.string().optional(),
+    unknownRiskDecision: z.union([z.literal("deny"), z.literal("step-up")]).optional(),
+    outboundDestinationAllowlist: z.array(z.string()).optional(),
+    defaultDataClass: TrustDataClassSchema.optional(),
+    layers: TrustLayerRulesSchema.optional(),
+    audit: z
+      .object({
+        enabled: z.boolean().optional(),
+        path: z.string().optional(),
+        failClosed: z.boolean().optional(),
+        includePayload: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    emergency: z
+      .object({
+        killSwitch: z.boolean().optional(),
+        revokedDestinations: z.array(z.string()).optional(),
+        quarantinedSkills: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
+    riskHints: z
+      .object({
+        exec: z
+          .object({
+            criticalPatterns: z.array(z.string()).optional(),
+            highPatterns: z.array(z.string()).optional(),
+            mediumPatterns: z.array(z.string()).optional(),
+          })
+          .strict()
+          .optional(),
+        message: z
+          .object({
+            highRiskActions: z.array(z.string()).optional(),
+            criticalActions: z.array(z.string()).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
 export const OpenClawSchema = z
   .object({
     $schema: z.string().optional(),
@@ -313,6 +433,7 @@ export const OpenClawSchema = z
     nodeHost: NodeHostSchema,
     agents: AgentsSchema,
     tools: ToolsSchema,
+    trust: TrustSchema,
     bindings: BindingsSchema,
     broadcast: BroadcastSchema,
     audio: AudioSchema,

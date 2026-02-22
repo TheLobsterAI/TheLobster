@@ -9,6 +9,11 @@ import {
 } from "../infra/shell-env.js";
 import { logInfo } from "../logger.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
+import {
+  buildExecTrustAction,
+  evaluateTrustGate,
+  resolveTrustRuntimeConfig,
+} from "../trust/runtime.js";
 import { markBackgrounded } from "./bash-process-registry.js";
 import { processGatewayAllowlist } from "./bash-tools.exec-host-gateway.js";
 import { executeNodeHostCommand } from "./bash-tools.exec-host-node.js";
@@ -327,6 +332,36 @@ export function createExecTool(
         ask = "off";
       }
 
+      const trustRuntime = resolveTrustRuntimeConfig({ trustConfig: defaults?.trustConfig });
+      const trustProposalAction = buildExecTrustAction({
+        runtime: trustRuntime,
+        command: params.command,
+        stage: "proposal",
+        host,
+        workdir: params.workdir?.trim() || defaults?.cwd || process.cwd(),
+        actorId: agentId ?? defaults?.sessionKey ?? null,
+        actorType: defaults?.sessionKey ? "human" : "agent",
+        sessionId: defaults?.sessionKey,
+        channel: defaults?.messageProvider,
+        audience: defaults?.scopeKey,
+      });
+      const trustProposal = await evaluateTrustGate({
+        trustConfig: defaults?.trustConfig,
+        action: trustProposalAction,
+      });
+      if (trustProposal.blocked) {
+        throw new Error(`Trust policy denied exec proposal: ${trustProposal.decision.reason}`);
+      }
+      if (trustProposal.decision.decision === "step-up") {
+        if (host === "sandbox") {
+          throw new Error(
+            "Trust policy requires step-up approval for this command. host=sandbox does not support approvals; use host=gateway or host=node.",
+          );
+        }
+        ask = "always";
+        warnings.push("Warning: trust policy escalated exec to step-up approval.");
+      }
+
       const sandbox = host === "sandbox" ? defaults?.sandbox : undefined;
       if (
         host === "sandbox" &&
@@ -410,6 +445,9 @@ export function createExecTool(
           warnings,
           notifySessionKey,
           trustedSafeBinDirs,
+          trustConfig: defaults?.trustConfig,
+          messageProvider: defaults?.messageProvider,
+          scopeKey: defaults?.scopeKey,
         });
       }
 
@@ -434,6 +472,8 @@ export function createExecTool(
           maxOutput,
           pendingMaxOutput,
           trustedSafeBinDirs,
+          trustConfig: defaults?.trustConfig,
+          messageProvider: defaults?.messageProvider,
         });
         if (gatewayResult.pendingResult) {
           return gatewayResult.pendingResult;
@@ -445,6 +485,26 @@ export function createExecTool(
         typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
       const getWarningText = () => (warnings.length ? `${warnings.join("\n")}\n\n` : "");
       const usePty = params.pty === true && !sandbox;
+
+      const trustExecutionAction = buildExecTrustAction({
+        runtime: trustRuntime,
+        command: params.command,
+        stage: "execution",
+        host,
+        workdir,
+        actorId: agentId ?? defaults?.sessionKey ?? null,
+        actorType: defaults?.sessionKey ? "human" : "agent",
+        sessionId: defaults?.sessionKey,
+        channel: defaults?.messageProvider,
+        audience: defaults?.scopeKey,
+      });
+      const trustExecution = await evaluateTrustGate({
+        trustConfig: defaults?.trustConfig,
+        action: trustExecutionAction,
+      });
+      if (trustExecution.blocked) {
+        throw new Error(`Trust policy denied exec execution: ${trustExecution.decision.reason}`);
+      }
 
       // Preflight: catch a common model failure mode (shell syntax leaking into Python/JS sources)
       // before we execute and burn tokens in cron loops.

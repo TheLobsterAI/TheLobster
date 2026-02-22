@@ -216,6 +216,21 @@ describe("exec tool backgrounding", () => {
     expect(text).toContain("hi");
   });
 
+  it("blocks exec when trust kill switch is active", async () => {
+    const customBash = createTestExecTool({
+      trustConfig: {
+        emergency: { killSwitch: true },
+        audit: { enabled: false },
+      },
+    });
+
+    await expect(
+      customBash.execute("call-trust-kill", {
+        command: "echo hi",
+      }),
+    ).rejects.toThrow("Trust policy denied exec proposal");
+  });
+
   it("logs line-based slices and defaults to last lines", async () => {
     const result = await execTool.execute("call1", {
       command: echoLines(["one", "two", "three"]),

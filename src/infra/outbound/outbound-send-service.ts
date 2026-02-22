@@ -8,6 +8,7 @@ import { throwIfAborted } from "./abort.js";
 import type { OutboundSendDeps } from "./deliver.js";
 import type { MessagePollResult, MessageSendResult } from "./message.js";
 import { sendMessage, sendPoll } from "./message.js";
+import type { MessageTrustContext } from "./message.js";
 import { extractToolPayload } from "./tool-payload.js";
 
 export type OutboundGatewayContext = {
@@ -36,6 +37,7 @@ export type OutboundSendContext = {
     text?: string;
     mediaUrls?: string[];
   };
+  trust?: MessageTrustContext;
   abortSignal?: AbortSignal;
   silent?: boolean;
 };
@@ -134,6 +136,7 @@ export async function executeSendAction(params: {
     deps: params.ctx.deps,
     gateway: params.ctx.gateway,
     mirror: params.ctx.mirror,
+    trust: params.ctx.trust,
     abortSignal: params.ctx.abortSignal,
     silent: params.ctx.silent,
   });
@@ -184,6 +187,7 @@ export async function executePollAction(params: {
     isAnonymous: params.isAnonymous ?? undefined,
     dryRun: params.ctx.dryRun,
     gateway: params.ctx.gateway,
+    trust: params.ctx.trust,
   });
 
   return {

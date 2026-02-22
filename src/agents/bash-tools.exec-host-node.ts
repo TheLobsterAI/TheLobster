@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { TrustConfig } from "../config/types.trust.js";
 import {
   type ExecApprovalsFile,
   type ExecAsk,
@@ -12,6 +13,13 @@ import {
   resolveExecApprovalsFromFile,
 } from "../infra/exec-approvals.js";
 import { buildNodeShellCommand } from "../infra/node-shell.js";
+import {
+  buildExecTrustAction,
+  buildSyntheticApprovalGrant,
+  evaluateTrustGate,
+  recordTrustApprovalEvent,
+  resolveTrustRuntimeConfig,
+} from "../trust/runtime.js";
 import { requestExecApprovalDecision } from "./bash-tools.exec-approval-request.js";
 import {
   DEFAULT_APPROVAL_TIMEOUT_MS,
@@ -39,6 +47,9 @@ export type ExecuteNodeHostCommandParams = {
   warnings: string[];
   notifySessionKey?: string;
   trustedSafeBinDirs?: ReadonlySet<string>;
+  trustConfig?: TrustConfig;
+  messageProvider?: string;
+  scopeKey?: string;
 };
 
 export async function executeNodeHostCommand(
@@ -54,6 +65,27 @@ export async function executeNodeHostCommand(
   if (hostSecurity === "deny") {
     throw new Error("exec denied: host=node security=deny");
   }
+  const trustRuntime = resolveTrustRuntimeConfig({ trustConfig: params.trustConfig });
+  const trustProposalAction = buildExecTrustAction({
+    runtime: trustRuntime,
+    command: params.command,
+    stage: "proposal",
+    host: "node",
+    workdir: params.workdir,
+    actorId: params.agentId ?? params.sessionKey ?? null,
+    actorType: params.sessionKey ? "human" : "agent",
+    sessionId: params.sessionKey,
+    channel: params.messageProvider,
+    audience: params.scopeKey,
+  });
+  const trustProposal = await evaluateTrustGate({
+    trustConfig: params.trustConfig,
+    action: trustProposalAction,
+  });
+  if (trustProposal.blocked) {
+    throw new Error(`Trust policy denied exec proposal: ${trustProposal.decision.reason}`);
+  }
+  const trustRequiresStepUp = trustProposal.decision.decision === "step-up";
   if (params.boundNode && params.requestedNode && params.boundNode !== params.requestedNode) {
     throw new Error(`exec node not allowed (bound to ${params.boundNode})`);
   }
@@ -133,12 +165,16 @@ export async function executeNodeHostCommand(
       // Fall back to requiring approval if node approvals cannot be fetched.
     }
   }
-  const requiresAsk = requiresExecApproval({
-    ask: hostAsk,
-    security: hostSecurity,
-    analysisOk,
-    allowlistSatisfied,
-  });
+  const requiresAsk =
+    requiresExecApproval({
+      ask: hostAsk,
+      security: hostSecurity,
+      analysisOk,
+      allowlistSatisfied,
+    }) || trustRequiresStepUp;
+  if (trustRequiresStepUp) {
+    params.warnings.push("Warning: trust policy escalated exec to step-up approval.");
+  }
   const invokeTimeoutMs = Math.max(
     10_000,
     (typeof params.timeoutSec === "number" ? params.timeoutSec : params.defaultTimeoutSec) * 1000 +
@@ -219,9 +255,58 @@ export async function executeNodeHostCommand(
         approvalDecision = "allow-always";
       }
 
+      if (decision === "allow-once" || decision === "allow-always" || decision === "deny") {
+        void recordTrustApprovalEvent({
+          trustConfig: params.trustConfig,
+          action: trustProposalAction,
+          approvalId,
+          decision,
+          approvers: [params.agentId ?? "approval-system"],
+          scope: decision === "allow-always" ? "policy" : "once",
+        }).catch(() => undefined);
+      }
+
       if (deniedReason) {
         emitExecSystemEvent(
           `Exec denied (node=${nodeId} id=${approvalId}, ${deniedReason}): ${params.command}`,
+          {
+            sessionKey: params.notifySessionKey,
+            contextKey,
+          },
+        );
+        return;
+      }
+
+      const trustExecutionAction = buildExecTrustAction({
+        runtime: trustRuntime,
+        command: params.command,
+        stage: "execution",
+        host: "node",
+        workdir: params.workdir,
+        actorId: params.agentId ?? params.sessionKey ?? null,
+        actorType: params.sessionKey ? "human" : "agent",
+        sessionId: params.sessionKey,
+        channel: params.messageProvider,
+        audience: params.scopeKey,
+      });
+      const trustApprovals = approvedByAsk
+        ? [
+            buildSyntheticApprovalGrant({
+              action: trustExecutionAction,
+              approvalId,
+              approvers: [params.agentId ?? "approval-system"],
+              scope: approvalDecision === "allow-always" ? "policy" : "once",
+            }),
+          ]
+        : undefined;
+      const trustExecution = await evaluateTrustGate({
+        trustConfig: params.trustConfig,
+        action: trustExecutionAction,
+        approvals: trustApprovals,
+      });
+      if (trustExecution.blocked) {
+        emitExecSystemEvent(
+          `Exec denied (node=${nodeId} id=${approvalId}, trust-policy): ${trustExecution.decision.reason}`,
           {
             sessionKey: params.notifySessionKey,
             contextKey,
@@ -281,6 +366,26 @@ export async function executeNodeHostCommand(
         nodeId,
       },
     };
+  }
+
+  const trustExecutionAction = buildExecTrustAction({
+    runtime: trustRuntime,
+    command: params.command,
+    stage: "execution",
+    host: "node",
+    workdir: params.workdir,
+    actorId: params.agentId ?? params.sessionKey ?? null,
+    actorType: params.sessionKey ? "human" : "agent",
+    sessionId: params.sessionKey,
+    channel: params.messageProvider,
+    audience: params.scopeKey,
+  });
+  const trustExecution = await evaluateTrustGate({
+    trustConfig: params.trustConfig,
+    action: trustExecutionAction,
+  });
+  if (trustExecution.blocked) {
+    throw new Error(`Trust policy denied exec execution: ${trustExecution.decision.reason}`);
   }
 
   const startedAt = Date.now();

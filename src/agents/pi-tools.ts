@@ -380,6 +380,7 @@ export function createOpenClawCodingTools(options?: {
     notifyOnExit: options?.exec?.notifyOnExit ?? execConfig.notifyOnExit,
     notifyOnExitEmptySuccess:
       options?.exec?.notifyOnExitEmptySuccess ?? execConfig.notifyOnExitEmptySuccess,
+    trustConfig: options?.config?.trust,
     sandbox: sandbox
       ? {
           containerName: sandbox.containerName,

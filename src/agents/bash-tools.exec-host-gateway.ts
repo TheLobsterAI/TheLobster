@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { TrustConfig } from "../config/types.trust.js";
 import {
   addAllowlistEntry,
   type ExecAsk,
@@ -15,6 +16,13 @@ import {
   resolveExecApprovals,
 } from "../infra/exec-approvals.js";
 import type { SafeBinProfile } from "../infra/exec-safe-bin-policy.js";
+import {
+  buildExecTrustAction,
+  buildSyntheticApprovalGrant,
+  evaluateTrustGate,
+  recordTrustApprovalEvent,
+  resolveTrustRuntimeConfig,
+} from "../trust/runtime.js";
 import { markBackgrounded, tail } from "./bash-process-registry.js";
 import { requestExecApprovalDecision } from "./bash-tools.exec-approval-request.js";
 import {
@@ -47,6 +55,8 @@ export type ProcessGatewayAllowlistParams = {
   maxOutput: number;
   pendingMaxOutput: number;
   trustedSafeBinDirs?: ReadonlySet<string>;
+  trustConfig?: TrustConfig;
+  messageProvider?: string;
 };
 
 export type ProcessGatewayAllowlistResult = {
@@ -86,17 +96,44 @@ export async function processGatewayAllowlist(
   );
   const requiresHeredocApproval =
     hostSecurity === "allowlist" && analysisOk && allowlistSatisfied && hasHeredocSegment;
+  const trustRuntime = resolveTrustRuntimeConfig({ trustConfig: params.trustConfig });
+  const trustProposalAction = buildExecTrustAction({
+    runtime: trustRuntime,
+    command: params.command,
+    stage: "proposal",
+    host: "gateway",
+    workdir: params.workdir,
+    actorId: params.agentId ?? params.sessionKey ?? null,
+    actorType: params.sessionKey ? "human" : "agent",
+    sessionId: params.sessionKey,
+    channel: params.messageProvider,
+    audience: params.scopeKey,
+  });
+  const trustProposal = await evaluateTrustGate({
+    trustConfig: params.trustConfig,
+    action: trustProposalAction,
+  });
+  if (trustProposal.blocked) {
+    throw new Error(`Trust policy denied exec proposal: ${trustProposal.decision.reason}`);
+  }
+  const trustRequiresStepUp = trustProposal.decision.decision === "step-up";
+
   const requiresAsk =
     requiresExecApproval({
       ask: hostAsk,
       security: hostSecurity,
       analysisOk,
       allowlistSatisfied,
-    }) || requiresHeredocApproval;
+    }) ||
+    requiresHeredocApproval ||
+    trustRequiresStepUp;
   if (requiresHeredocApproval) {
     params.warnings.push(
       "Warning: heredoc execution requires explicit approval in allowlist mode.",
     );
+  }
+  if (trustRequiresStepUp) {
+    params.warnings.push("Warning: trust policy escalated exec to step-up approval.");
   }
 
   if (requiresAsk) {
@@ -175,6 +212,17 @@ export async function processGatewayAllowlist(
         deniedReason = deniedReason ?? "allowlist-miss";
       }
 
+      if (decision === "allow-once" || decision === "allow-always" || decision === "deny") {
+        void recordTrustApprovalEvent({
+          trustConfig: params.trustConfig,
+          action: trustProposalAction,
+          approvalId,
+          decision,
+          approvers: [params.agentId ?? "approval-system"],
+          scope: decision === "allow-always" ? "policy" : "once",
+        }).catch(() => undefined);
+      }
+
       if (deniedReason) {
         emitExecSystemEvent(
           `Exec denied (gateway id=${approvalId}, ${deniedReason}): ${params.command}`,
@@ -201,6 +249,44 @@ export async function processGatewayAllowlist(
             resolvedPath ?? undefined,
           );
         }
+      }
+
+      const trustExecutionAction = buildExecTrustAction({
+        runtime: trustRuntime,
+        command: params.command,
+        stage: "execution",
+        host: "gateway",
+        workdir: params.workdir,
+        actorId: params.agentId ?? params.sessionKey ?? null,
+        actorType: params.sessionKey ? "human" : "agent",
+        sessionId: params.sessionKey,
+        channel: params.messageProvider,
+        audience: params.scopeKey,
+      });
+      const trustApprovals = approvedByAsk
+        ? [
+            buildSyntheticApprovalGrant({
+              action: trustExecutionAction,
+              approvalId,
+              approvers: [params.agentId ?? "approval-system"],
+              scope: decision === "allow-always" ? "policy" : "once",
+            }),
+          ]
+        : undefined;
+      const trustExecution = await evaluateTrustGate({
+        trustConfig: params.trustConfig,
+        action: trustExecutionAction,
+        approvals: trustApprovals,
+      });
+      if (trustExecution.blocked) {
+        emitExecSystemEvent(
+          `Exec denied (gateway id=${approvalId}, trust-policy): ${trustExecution.decision.reason}`,
+          {
+            sessionKey: params.notifySessionKey,
+            contextKey,
+          },
+        );
+        return;
       }
 
       let run: Awaited<ReturnType<typeof runExecProcess>> | null = null;
@@ -336,6 +422,26 @@ export async function processGatewayAllowlist(
         allowlistEval.segments[0]?.resolution?.resolvedPath,
       );
     }
+  }
+
+  const trustExecutionAction = buildExecTrustAction({
+    runtime: trustRuntime,
+    command: params.command,
+    stage: "execution",
+    host: "gateway",
+    workdir: params.workdir,
+    actorId: params.agentId ?? params.sessionKey ?? null,
+    actorType: params.sessionKey ? "human" : "agent",
+    sessionId: params.sessionKey,
+    channel: params.messageProvider,
+    audience: params.scopeKey,
+  });
+  const trustExecution = await evaluateTrustGate({
+    trustConfig: params.trustConfig,
+    action: trustExecutionAction,
+  });
+  if (trustExecution.blocked) {
+    throw new Error(`Trust policy denied exec execution: ${trustExecution.decision.reason}`);
   }
 
   return { execCommandOverride };

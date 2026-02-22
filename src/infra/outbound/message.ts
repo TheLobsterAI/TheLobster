@@ -1,9 +1,15 @@
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
+import type { TrustDataClassification } from "../../config/types.trust.js";
 import { callGatewayLeastPrivilege, randomIdempotencyKey } from "../../gateway/call.js";
 import type { PollInput } from "../../polls.js";
 import { normalizePollInput } from "../../polls.js";
+import {
+  buildMessageTrustAction,
+  evaluateTrustGate,
+  resolveTrustRuntimeConfig,
+} from "../../trust/runtime.js";
 import {
   GATEWAY_CLIENT_MODES,
   GATEWAY_CLIENT_NAMES,
@@ -26,6 +32,19 @@ export type MessageGatewayOptions = {
   clientName?: GatewayClientName;
   clientDisplayName?: string;
   mode?: GatewayClientMode;
+};
+
+export type MessageTrustContext = {
+  actorId?: string | null;
+  actorType?: "human" | "agent" | "service";
+  sessionId?: string;
+  audience?: string;
+  membershipVersion?: string;
+  roleVersion?: string;
+  policyVersion?: string;
+  sourceSystem?: string;
+  sourceResource?: string;
+  sourceDataClass?: TrustDataClassification;
 };
 
 type MessageSendParams = {
@@ -52,6 +71,7 @@ type MessageSendParams = {
     text?: string;
     mediaUrls?: string[];
   };
+  trust?: MessageTrustContext;
   abortSignal?: AbortSignal;
   silent?: boolean;
 };
@@ -82,6 +102,7 @@ type MessagePollParams = {
   cfg?: OpenClawConfig;
   gateway?: MessageGatewayOptions;
   idempotencyKey?: string;
+  trust?: MessageTrustContext;
 };
 
 export type MessagePollResult = {
@@ -145,6 +166,59 @@ function resolveGatewayOptions(opts?: MessageGatewayOptions) {
   };
 }
 
+function resolveDestinationKind(params: { channel: string; to: string }) {
+  const to = params.to.trim().toLowerCase();
+  if (to.startsWith("http://") || to.startsWith("https://")) {
+    return "http" as const;
+  }
+  if (to.includes("@")) {
+    return "email" as const;
+  }
+  if (to.startsWith("/") || to.startsWith("./") || to.startsWith("../")) {
+    return "file" as const;
+  }
+  return "chat" as const;
+}
+
+async function enforceMessageTrust(params: {
+  cfg: OpenClawConfig;
+  channel: string;
+  action: string;
+  stage: "execution" | "outbound";
+  to: string;
+  textPayload?: string;
+  filePayloads?: string[];
+  trust?: MessageTrustContext;
+}) {
+  const runtime = resolveTrustRuntimeConfig({ cfg: params.cfg });
+  const action = buildMessageTrustAction({
+    runtime,
+    action: params.action,
+    stage: params.stage,
+    channel: params.channel,
+    destinationTarget: params.to,
+    destinationKind: resolveDestinationKind({ channel: params.channel, to: params.to }),
+    textPayload: params.textPayload,
+    filePayloads: params.filePayloads,
+    actorId: params.trust?.actorId,
+    actorType: params.trust?.actorType,
+    sessionId: params.trust?.sessionId,
+    membershipVersion: params.trust?.membershipVersion,
+    roleVersion: params.trust?.roleVersion,
+    policyVersion: params.trust?.policyVersion,
+    sourceSystem: params.trust?.sourceSystem,
+    sourceResource: params.trust?.sourceResource,
+    sourceDataClass: params.trust?.sourceDataClass,
+  });
+
+  const gate = await evaluateTrustGate({ cfg: params.cfg, action });
+  if (gate.blocked) {
+    throw new Error(
+      `Trust policy denied ${params.action} ${params.stage}: ${gate.decision.reason}`,
+    );
+  }
+}
+
 async function callMessageGateway<T>(params: {
   gateway?: MessageGatewayOptions;
   method: string;
@@ -183,6 +257,28 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
     (payload) => payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []),
   );
   const primaryMediaUrl = mirrorMediaUrls[0] ?? params.mediaUrl ?? null;
+
+  await enforceMessageTrust({
+    cfg,
+    channel,
+    action: "send",
+    stage: "execution",
+    to: params.to,
+    textPayload: params.content,
+    filePayloads: mirrorMediaUrls,
+    trust: params.trust,
+  });
+
+  await enforceMessageTrust({
+    cfg,
+    channel,
+    action: "send",
+    stage: "outbound",
+    to: params.to,
+    textPayload: params.content,
+    filePayloads: mirrorMediaUrls,
+    trust: params.trust,
+  });
 
   if (params.dryRun) {
     return {
@@ -286,6 +382,26 @@ export async function sendPoll(params: MessagePollParams): Promise<MessagePollRe
   const normalized = outbound.pollMaxOptions
     ? normalizePollInput(pollInput, { maxOptions: outbound.pollMaxOptions })
     : normalizePollInput(pollInput);
+
+  const pollText = `${normalized.question}\n${normalized.options.join("\n")}`;
+  await enforceMessageTrust({
+    cfg,
+    channel,
+    action: "poll",
+    stage: "execution",
+    to: params.to,
+    textPayload: pollText,
+    trust: params.trust,
+  });
+  await enforceMessageTrust({
+    cfg,
+    channel,
+    action: "poll",
+    stage: "outbound",
+    to: params.to,
+    textPayload: pollText,
+    trust: params.trust,
+  });
 
   if (params.dryRun) {
     return {

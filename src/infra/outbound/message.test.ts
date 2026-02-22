@@ -51,4 +51,37 @@ describe("sendMessage", () => {
       }),
     );
   });
+
+  it("blocks outbound send when trust kill switch is enabled", async () => {
+    await expect(
+      sendMessage({
+        cfg: {
+          trust: {
+            emergency: { killSwitch: true },
+            audit: { enabled: false },
+          },
+        },
+        channel: "mattermost",
+        to: "channel:town-square",
+        content: "hi",
+      }),
+    ).rejects.toThrow(/Trust policy denied/i);
+  });
+
+  it("simulates trust denials without blocking when mode=simulate", async () => {
+    await sendMessage({
+      cfg: {
+        trust: {
+          mode: "simulate",
+          emergency: { killSwitch: true },
+          audit: { enabled: false },
+        },
+      },
+      channel: "mattermost",
+      to: "channel:town-square",
+      content: "hi",
+    });
+
+    expect(mocks.deliverOutboundPayloads).toHaveBeenCalled();
+  });
 });
