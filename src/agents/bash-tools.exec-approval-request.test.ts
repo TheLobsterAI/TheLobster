@@ -46,7 +46,7 @@ describe("requestExecApprovalDecision", () => {
       resolvedBy: "Operator",
       resolvedByDeviceId: "device-1",
       resolvedByClientId: "client-1",
-      approvers: ["device-1", "client-1", "Operator"],
+      approvers: ["client-1"],
     });
     expect(callGatewayTool).toHaveBeenCalledWith(
       "exec.approval.request",
@@ -109,7 +109,7 @@ describe("requestExecApprovalDecision", () => {
       decision: "allow-always",
       resolvedBy: "  operator-1  ",
       resolvedByDeviceId: "Device-1",
-      resolvedByClientId: "device-1",
+      resolvedByClientId: "client-1",
     });
 
     await expect(
@@ -125,8 +125,34 @@ describe("requestExecApprovalDecision", () => {
       decision: "allow-always",
       resolvedBy: "operator-1",
       resolvedByDeviceId: "Device-1",
-      resolvedByClientId: "device-1",
-      approvers: ["Device-1", "operator-1"],
+      resolvedByClientId: "client-1",
+      approvers: ["client-1"],
+    });
+  });
+
+  it("prefers explicit approver principals from payload", async () => {
+    vi.mocked(callGatewayTool).mockResolvedValue({
+      decision: "allow-once",
+      resolvedBy: "Operator",
+      resolvedByClientId: "client-1",
+      approvers: ["approver-a", " approver-b ", "APPROVER-A", ""],
+    });
+
+    await expect(
+      requestExecApprovalDecision({
+        id: "approval-id-4",
+        command: "echo hi",
+        cwd: "/tmp",
+        host: "gateway",
+        security: "allowlist",
+        ask: "always",
+      }),
+    ).resolves.toEqual({
+      decision: "allow-once",
+      resolvedBy: "Operator",
+      resolvedByDeviceId: null,
+      resolvedByClientId: "client-1",
+      approvers: ["approver-a", "approver-b"],
     });
   });
 });

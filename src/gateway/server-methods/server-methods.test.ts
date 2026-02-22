@@ -438,6 +438,7 @@ describe("exec approval handlers", () => {
         resolvedBy: "Operator One",
         resolvedByDeviceId: "device-1",
         resolvedByClientId: "client-1",
+        approvers: ["client-1"],
       }),
       undefined,
     );
@@ -451,6 +452,7 @@ describe("exec approval handlers", () => {
         resolvedBy: "Operator One",
         resolvedByDeviceId: "device-1",
         resolvedByClientId: "client-1",
+        approvers: ["client-1"],
       }),
     );
     expect(resolveRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);

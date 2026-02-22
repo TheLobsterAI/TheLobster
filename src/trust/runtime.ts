@@ -626,6 +626,8 @@ export async function recordTrustApprovalEvent(params: {
   approvalId: string;
   decision: "allow-once" | "allow-always" | "deny";
   resolvedBy?: string | null;
+  resolvedByDeviceId?: string | null;
+  resolvedByClientId?: string | null;
   approvers?: string[];
   scope?: "once" | "session" | "policy";
 }): Promise<string | undefined> {
@@ -646,6 +648,8 @@ export async function recordTrustApprovalEvent(params: {
       approvalId: params.approvalId,
       decision: params.decision,
       resolvedBy: params.resolvedBy ?? null,
+      resolvedByDeviceId: params.resolvedByDeviceId ?? null,
+      resolvedByClientId: params.resolvedByClientId ?? null,
       approvers: params.approvers ?? [],
       scope: params.scope ?? "once",
       stage: params.action.stage,

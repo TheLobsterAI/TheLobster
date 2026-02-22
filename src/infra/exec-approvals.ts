@@ -33,6 +33,7 @@ export type ExecApprovalResolved = {
   resolvedBy?: string | null;
   resolvedByDeviceId?: string | null;
   resolvedByClientId?: string | null;
+  approvers?: string[];
   ts: number;
 };
 

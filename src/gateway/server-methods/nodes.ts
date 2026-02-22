@@ -184,13 +184,28 @@ function resolveNodeInvokeTrustWorkdir(params: {
   return `/node/${params.nodeId}`;
 }
 
+function resolveApprovalApprovers(params: {
+  resolvedByClientId?: unknown;
+  resolvedBy?: unknown;
+}): string[] {
+  const resolvedByClientId = normalizeString(params.resolvedByClientId);
+  if (resolvedByClientId) {
+    return [resolvedByClientId];
+  }
+  const resolvedBy = normalizeString(params.resolvedBy);
+  return resolvedBy ? [resolvedBy] : [];
+}
+
 function buildNodeInvokeTrustApprovals(params: {
   action: Parameters<typeof buildSyntheticApprovalGrant>[0]["action"];
   approvalContext: NodeInvokeApprovalContext | null;
   snapshotLookup:
-    | ((
-        runId: string,
-      ) => { createdAtMs: number; expiresAtMs: number; resolvedBy?: string | null } | null)
+    | ((runId: string) => {
+        createdAtMs: number;
+        expiresAtMs: number;
+        resolvedBy?: string | null;
+        resolvedByClientId?: string | null;
+      } | null)
     | null;
 }): TrustApprovalGrant[] | undefined {
   if (!params.approvalContext) {
@@ -202,12 +217,15 @@ function buildNodeInvokeTrustApprovals(params: {
     snapshot && snapshot.expiresAtMs > snapshot.createdAtMs
       ? snapshot.expiresAtMs - snapshot.createdAtMs
       : undefined;
-  const resolvedBy = normalizeString(snapshot?.resolvedBy ?? null);
+  const approvers = resolveApprovalApprovers({
+    resolvedByClientId: snapshot?.resolvedByClientId ?? null,
+    resolvedBy: snapshot?.resolvedBy ?? null,
+  });
   return [
     buildSyntheticApprovalGrant({
       action: params.action,
       approvalId: params.approvalContext.runId,
-      approvers: resolvedBy ? [resolvedBy] : ["approval-system"],
+      approvers: approvers.length > 0 ? approvers : ["approval-system"],
       scope: params.approvalContext.decision === "allow-always" ? "policy" : "once",
       nowMs: createdAtMs,
       ttlMs,

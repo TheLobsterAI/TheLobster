@@ -68,6 +68,7 @@ export async function requestExecApprovalDecision(
     resolvedBy?: unknown;
     resolvedByDeviceId?: unknown;
     resolvedByClientId?: unknown;
+    approvers?: unknown;
   }>(
     "exec.approval.request",
     { timeoutMs: DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS },
@@ -92,17 +93,22 @@ export async function requestExecApprovalDecision(
           resolvedBy?: unknown;
           resolvedByDeviceId?: unknown;
           resolvedByClientId?: unknown;
+          approvers?: unknown;
         })
       : {};
 
   const resolvedBy = normalizeOptionalString(payload.resolvedBy);
   const resolvedByDeviceId = normalizeOptionalString(payload.resolvedByDeviceId);
   const resolvedByClientId = normalizeOptionalString(payload.resolvedByClientId);
+  const payloadApprovers = Array.isArray(payload.approvers)
+    ? uniqueNonEmpty(payload.approvers as Array<string | null | undefined>)
+    : [];
+  const primaryApprover = resolvedByClientId ?? resolvedBy;
   return {
     decision: normalizeDecision(payload.decision),
     resolvedBy,
     resolvedByDeviceId,
     resolvedByClientId,
-    approvers: uniqueNonEmpty([resolvedByDeviceId, resolvedByClientId, resolvedBy]),
+    approvers: payloadApprovers.length > 0 ? payloadApprovers : uniqueNonEmpty([primaryApprover]),
   };
 }

@@ -224,6 +224,8 @@ export async function processGatewayAllowlist(
           approvalId,
           decision,
           resolvedBy: approvalResult.resolvedBy,
+          resolvedByDeviceId: approvalResult.resolvedByDeviceId,
+          resolvedByClientId: approvalResult.resolvedByClientId,
           approvers: approvalApprovers,
           scope: decision === "allow-always" ? "policy" : "once",
         }).catch(() => undefined);

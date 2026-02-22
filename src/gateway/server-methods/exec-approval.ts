@@ -45,6 +45,13 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
   return out;
 }
 
+function resolveApproverPrincipals(params: {
+  resolvedByClientId: string | null;
+  resolvedBy: string | null;
+}): string[] {
+  return uniqueNonEmpty([params.resolvedByClientId ?? params.resolvedBy]);
+}
+
 export function createExecApprovalHandlers(
   manager: ExecApprovalManager,
   opts?: { forwarder?: ExecApprovalForwarder },
@@ -156,6 +163,9 @@ export function createExecApprovalHandlers(
 
       const decision = await decisionPromise;
       const resolved = manager.getSnapshot(record.id);
+      const resolvedBy = resolved?.resolvedBy ?? null;
+      const resolvedByDeviceId = resolved?.resolvedByDeviceId ?? null;
+      const resolvedByClientId = resolved?.resolvedByClientId ?? null;
       // Send final response with decision for callers using expectFinal:true.
       respond(
         true,
@@ -164,9 +174,10 @@ export function createExecApprovalHandlers(
           decision,
           createdAtMs: record.createdAtMs,
           expiresAtMs: record.expiresAtMs,
-          resolvedBy: resolved?.resolvedBy ?? null,
-          resolvedByDeviceId: resolved?.resolvedByDeviceId ?? null,
-          resolvedByClientId: resolved?.resolvedByClientId ?? null,
+          resolvedBy,
+          resolvedByDeviceId,
+          resolvedByClientId,
+          approvers: resolveApproverPrincipals({ resolvedByClientId, resolvedBy }),
         },
         undefined,
       );
@@ -190,6 +201,9 @@ export function createExecApprovalHandlers(
       // Capture snapshot before await (entry may be deleted after grace period)
       const snapshot = manager.getSnapshot(id);
       const decision = await decisionPromise;
+      const resolvedBy = snapshot?.resolvedBy ?? null;
+      const resolvedByDeviceId = snapshot?.resolvedByDeviceId ?? null;
+      const resolvedByClientId = snapshot?.resolvedByClientId ?? null;
       // Return decision (can be null on timeout) - let clients handle via askFallback
       respond(
         true,
@@ -198,9 +212,10 @@ export function createExecApprovalHandlers(
           decision,
           createdAtMs: snapshot?.createdAtMs,
           expiresAtMs: snapshot?.expiresAtMs,
-          resolvedBy: snapshot?.resolvedBy ?? null,
-          resolvedByDeviceId: snapshot?.resolvedByDeviceId ?? null,
-          resolvedByClientId: snapshot?.resolvedByClientId ?? null,
+          resolvedBy,
+          resolvedByDeviceId,
+          resolvedByClientId,
+          approvers: resolveApproverPrincipals({ resolvedByClientId, resolvedBy }),
         },
         undefined,
       );
@@ -240,7 +255,7 @@ export function createExecApprovalHandlers(
         return;
       }
       const snapshot = manager.getSnapshot(p.id);
-      const approvers = uniqueNonEmpty([resolvedByDeviceId, resolvedByClientId, resolvedBy]);
+      const approvers = resolveApproverPrincipals({ resolvedByClientId, resolvedBy });
       if (snapshot) {
         try {
           const cfg = loadConfig();
@@ -269,6 +284,8 @@ export function createExecApprovalHandlers(
             approvalId: p.id,
             decision,
             resolvedBy,
+            resolvedByDeviceId,
+            resolvedByClientId,
             approvers,
             scope: decision === "allow-always" ? "policy" : "once",
           }).catch((err) => {
@@ -291,6 +308,7 @@ export function createExecApprovalHandlers(
           resolvedBy,
           resolvedByDeviceId,
           resolvedByClientId,
+          approvers,
           ts,
         },
         { dropIfSlow: true },
@@ -302,6 +320,7 @@ export function createExecApprovalHandlers(
           resolvedBy,
           resolvedByDeviceId,
           resolvedByClientId,
+          approvers,
           ts,
         })
         .catch((err) => {
