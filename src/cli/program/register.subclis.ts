@@ -253,7 +253,7 @@ const entries: SubCliEntry[] = [
   },
   {
     name: "security",
-    description: "Security tools and local config audits",
+    description: "Security tools, trust simulation, and local config audits",
     hasSubcommands: true,
     register: async (program) => {
       const mod = await import("../security-cli.js");

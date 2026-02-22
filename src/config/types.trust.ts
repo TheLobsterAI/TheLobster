@@ -49,7 +49,7 @@ export type TrustAuditConfig = {
   enabled?: boolean;
   /** Optional path override for trust audit JSONL log. */
   path?: string;
-  /** Fail closed when audit append fails. Default: true in enforce mode. */
+  /** Fail closed when audit append fails. Default: true in enforce mode; false in simulate mode. */
   failClosed?: boolean;
   /** Include full payload snippets in audit events. */
   includePayload?: boolean;

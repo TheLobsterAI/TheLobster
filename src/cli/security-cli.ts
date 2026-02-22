@@ -1,10 +1,17 @@
+import fs from "node:fs/promises";
 import type { Command } from "commander";
 import { loadConfig } from "../config/config.js";
+import type { TrustConfig } from "../config/types.trust.js";
 import { defaultRuntime } from "../runtime.js";
 import { runSecurityAudit } from "../security/audit.js";
 import { fixSecurityFootguns } from "../security/fix.js";
 import { formatDocsLink } from "../terminal/links.js";
 import { isRich, theme } from "../terminal/theme.js";
+import {
+  exportTrustAuditEventsToSiem,
+  simulateTrustPolicyAgainstAudit,
+  type TrustSiemExportFormat,
+} from "../trust/compliance.js";
 import { shortenHomeInString, shortenHomePath } from "../utils.js";
 import { formatCliCommand } from "./command-format.js";
 import { formatHelpExamples } from "./help-format.js";
@@ -13,6 +20,23 @@ type SecurityAuditOptions = {
   json?: boolean;
   deep?: boolean;
   fix?: boolean;
+};
+
+type SecurityTrustExportOptions = {
+  out?: string;
+  format?: string;
+  auditPath?: string;
+  limit?: string;
+  verifyChain?: boolean;
+  includePayload?: boolean;
+  json?: boolean;
+};
+
+type SecurityTrustSimulationOptions = {
+  policyFile: string;
+  auditPath?: string;
+  limit?: string;
+  json?: boolean;
 };
 
 function formatSummary(summary: { critical: number; warn: number; info: number }): string {
@@ -27,6 +51,36 @@ function formatSummary(summary: { critical: number; warn: number; info: number }
   return parts.join(" · ");
 }
 
+function parsePositiveIntOption(raw: string | undefined, name: string): number | undefined {
+  if (!raw || raw.trim().length === 0) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parseTrustExportFormat(raw: string | undefined): TrustSiemExportFormat {
+  if (!raw || raw.trim().length === 0) {
+    return "jsonl";
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "jsonl" || normalized === "json") {
+    return normalized;
+  }
+  throw new Error(`unsupported format: ${raw} (use jsonl or json)`);
+}
+
+function parseTrustPolicyPatch(raw: string): Partial<TrustConfig> {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("policy file must contain a JSON object");
+  }
+  return parsed as Partial<TrustConfig>;
+}
+
 export function registerSecurityCli(program: Command) {
   const security = program
     .command("security")
@@ -39,8 +93,127 @@ export function registerSecurityCli(program: Command) {
           ["openclaw security audit --deep", "Include best-effort live Gateway probe checks."],
           ["openclaw security audit --fix", "Apply safe remediations and file-permission fixes."],
           ["openclaw security audit --json", "Output machine-readable JSON."],
+          [
+            "openclaw security trust export --out trust-siem.jsonl",
+            "Export trust audit SIEM records.",
+          ],
+          [
+            "openclaw security trust simulate --policy-file policy.json --json",
+            "Preview policy blast radius against recorded trust events.",
+          ],
         ])}\n\n${theme.muted("Docs:")} ${formatDocsLink("/cli/security", "docs.openclaw.ai/cli/security")}\n`,
     );
+
+  const trust = security
+    .command("trust")
+    .description("Trust audit evidence export and policy simulation");
+
+  trust
+    .command("export")
+    .description("Export trust audit chain to SIEM-friendly records")
+    .option("--out <path>", "Write export to a file instead of stdout")
+    .option("--format <format>", "Export format: jsonl or json", "jsonl")
+    .option("--audit-path <path>", "Optional trust audit JSONL path override")
+    .option("--limit <n>", "Export only the most recent n events")
+    .option("--verify-chain", "Verify immutable audit hash chain before export", false)
+    .option("--include-payload", "Include outbound payload snippets in export", false)
+    .option("--json", "Print command result as JSON", false)
+    .action(async (opts: SecurityTrustExportOptions) => {
+      const cfg = loadConfig();
+      const limit = parsePositiveIntOption(opts.limit, "limit");
+      const format = parseTrustExportFormat(opts.format);
+      const exported = await exportTrustAuditEventsToSiem({
+        cfg,
+        auditPath: opts.auditPath?.trim() || undefined,
+        outFile: opts.out?.trim() || undefined,
+        format,
+        limit,
+        verifyChain: opts.verifyChain === true,
+        includePayload: opts.includePayload === true,
+      });
+
+      if (opts.json) {
+        defaultRuntime.log(
+          JSON.stringify(
+            {
+              ok: true,
+              format: exported.format,
+              count: exported.records.length,
+              outputPath: exported.outputPath ?? null,
+              verification: exported.verification ?? null,
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      if (exported.outputPath) {
+        const verification = exported.verification
+          ? exported.verification.valid
+            ? "valid"
+            : `invalid (${exported.verification.error ?? "unknown"})`
+          : "not requested";
+        defaultRuntime.log(
+          [
+            `Trust SIEM export: ${exported.records.length} event(s) written to ${shortenHomePath(exported.outputPath)}`,
+            `Format: ${exported.format}`,
+            `Chain verification: ${verification}`,
+          ].join("\n"),
+        );
+        return;
+      }
+
+      defaultRuntime.log(exported.serialized);
+    });
+
+  trust
+    .command("simulate")
+    .description("Replay trust audit events against a candidate policy patch")
+    .requiredOption("--policy-file <path>", "JSON file containing a partial trust policy patch")
+    .option("--audit-path <path>", "Optional trust audit JSONL path override")
+    .option("--limit <n>", "Replay only the most recent n events")
+    .option("--json", "Print simulation result as JSON", false)
+    .action(async (opts: SecurityTrustSimulationOptions) => {
+      const cfg = loadConfig();
+      const limit = parsePositiveIntOption(opts.limit, "limit");
+      const rawPolicy = await fs.readFile(opts.policyFile, "utf-8");
+      const candidateTrustConfig = parseTrustPolicyPatch(rawPolicy);
+
+      const simulation = await simulateTrustPolicyAgainstAudit({
+        cfg,
+        auditPath: opts.auditPath?.trim() || undefined,
+        limit,
+        candidateTrustConfig,
+      });
+
+      if (opts.json) {
+        defaultRuntime.log(JSON.stringify(simulation, null, 2));
+        return;
+      }
+
+      const lines: string[] = [
+        "Trust policy simulation",
+        `Replayable events: ${simulation.replayedEvents}/${simulation.totalEvents}`,
+        `Changed decisions: ${simulation.changedEvents}`,
+        `Blast radius: ${(simulation.changeRate * 100).toFixed(2)}%`,
+        `Posture score (current -> candidate): ${simulation.posture.current.score} -> ${simulation.posture.candidate.score}`,
+      ];
+      if (simulation.posture.drift.length > 0) {
+        lines.push(`Posture drift: ${simulation.posture.drift.join(", ")}`);
+      }
+      if (simulation.changes.length > 0) {
+        lines.push("");
+        lines.push("Sample changes:");
+        for (const change of simulation.changes.slice(0, 10)) {
+          lines.push(
+            `- ${change.stage} ${change.operation}: ${change.from} -> ${change.to} (${change.reason})`,
+          );
+        }
+      }
+      defaultRuntime.log(lines.join("\n"));
+    });
 
   security
     .command("audit")

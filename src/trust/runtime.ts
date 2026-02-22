@@ -195,7 +195,7 @@ export function resolveTrustRuntimeConfig(params: {
     tenantId,
     defaultDataClass,
     auditEnabled: configured?.audit?.enabled !== false,
-    auditFailClosed: configured?.audit?.failClosed ?? false,
+    auditFailClosed: configured?.audit?.failClosed ?? mode === "enforce",
     auditIncludePayload: configured?.audit?.includePayload === true,
     policy,
     emergency: {
@@ -568,6 +568,19 @@ async function writeTrustAudit(params: {
     approval: params.decision.approval,
     dlp: params.decision.dlp,
     chain: params.decision.chain,
+    actor: {
+      actorType: params.action.actor.actorType,
+      roleVersion: params.action.actor.roleVersion ?? null,
+      roles: params.action.actor.roles ?? [],
+    },
+    context: {
+      channel: params.action.context.channel,
+      audience: params.action.context.audience,
+      sessionId: params.action.context.sessionId,
+      occurredAtMs: params.action.context.occurredAtMs,
+      membershipVersion: params.action.context.membershipVersion ?? null,
+      policyVersion: params.action.context.policyVersion ?? null,
+    },
     source: {
       system: params.action.source.system,
       resource: params.action.source.resource,

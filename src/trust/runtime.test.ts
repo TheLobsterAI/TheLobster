@@ -29,6 +29,18 @@ afterEach(() => {
 });
 
 describe("trust runtime", () => {
+  it("fails closed on audit append errors by default in enforce mode", () => {
+    const enforceRuntime = resolveTrustRuntimeConfig({
+      trustConfig: { mode: "enforce", audit: { enabled: true } },
+    });
+    const simulateRuntime = resolveTrustRuntimeConfig({
+      trustConfig: { mode: "simulate", audit: { enabled: true } },
+    });
+
+    expect(enforceRuntime.auditFailClosed).toBe(true);
+    expect(simulateRuntime.auditFailClosed).toBe(false);
+  });
+
   it("enforces emergency kill switch in enforce mode", async () => {
     const trustConfig = {
       emergency: { killSwitch: true },
@@ -103,6 +115,8 @@ describe("trust runtime", () => {
     const events = await readTrustAuditEvents({ overridePath: temp.file });
     expect(events.length).toBe(1);
     expect(events[0]?.kind).toBe("delivery");
+    expect(events[0]?.payload?.["context"]).toBeTruthy();
+    expect(events[0]?.payload?.["actor"]).toBeTruthy();
 
     const verify = await verifyTrustAuditLog({ overridePath: temp.file });
     expect(verify.valid).toBe(true);

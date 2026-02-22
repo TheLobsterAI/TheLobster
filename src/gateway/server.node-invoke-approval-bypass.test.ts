@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { WebSocket } from "ws";
 import {
@@ -55,6 +57,22 @@ async function requestAllowOnceApproval(ws: WebSocket, command: string): Promise
   const requested = await requestP;
   expect(requested.ok).toBe(true);
   return approvalId;
+}
+
+async function writeTrustConfigForSuite(trust: Record<string, unknown>): Promise<void> {
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error("OPENCLAW_CONFIG_PATH is not set");
+  }
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+  let current: Record<string, unknown> = {};
+  try {
+    const raw = await fs.readFile(configPath, "utf-8");
+    current = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    current = {};
+  }
+  await fs.writeFile(configPath, JSON.stringify({ ...current, trust }, null, 2), "utf-8");
 }
 
 describe("node.invoke approval bypass", () => {
@@ -271,6 +289,46 @@ describe("node.invoke approval bypass", () => {
     } finally {
       ws.close();
       node.stop();
+    }
+  });
+
+  test("denies node.invoke when trust emergency kill switch is active", async () => {
+    await writeTrustConfigForSuite({
+      enabled: true,
+      mode: "enforce",
+      emergency: { killSwitch: true },
+      audit: { enabled: false },
+    });
+
+    let sawInvoke = false;
+    const node = await connectLinuxNode(() => {
+      sawInvoke = true;
+    });
+    const ws = await connectOperator(["operator.write"]);
+
+    try {
+      const nodeId = await getConnectedNodeId(ws);
+      const res = await rpcReq(ws, "node.invoke", {
+        nodeId,
+        command: "system.run",
+        params: {
+          command: ["echo", "hello"],
+          rawCommand: "echo hello",
+        },
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error?.message ?? "").toContain("Trust policy denied node.invoke proposal");
+      await expectNoForwardedInvoke(() => sawInvoke);
+    } finally {
+      ws.close();
+      node.stop();
+      await writeTrustConfigForSuite({
+        enabled: true,
+        mode: "enforce",
+        emergency: { killSwitch: false },
+        audit: { enabled: false },
+      });
     }
   });
 

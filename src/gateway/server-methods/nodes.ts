@@ -14,6 +14,14 @@ import {
   sendApnsAlert,
   sendApnsBackgroundWake,
 } from "../../infra/push-apns.js";
+import { resolveSystemRunCommand } from "../../infra/system-run-command.js";
+import {
+  buildExecTrustAction,
+  buildSyntheticApprovalGrant,
+  evaluateTrustGate,
+  resolveTrustRuntimeConfig,
+} from "../../trust/runtime.js";
+import type { TrustApprovalGrant } from "../../trust/trust-plane.js";
 import { isNodeCommandAllowed, resolveNodeCommandAllowlist } from "../node-command-policy.js";
 import { sanitizeNodeInvokeParamsForForwarding } from "../node-invoke-sanitize.js";
 import {
@@ -38,7 +46,7 @@ import {
   safeParseJson,
   uniqueSortedStrings,
 } from "./nodes.helpers.js";
-import type { GatewayRequestHandlers } from "./types.js";
+import type { GatewayClient, GatewayRequestHandlers } from "./types.js";
 
 const NODE_WAKE_RECONNECT_WAIT_MS = 3_000;
 const NODE_WAKE_RECONNECT_RETRY_WAIT_MS = 12_000;
@@ -80,6 +88,131 @@ function isNodeEntry(entry: { role?: string; roles?: string[] }) {
     return true;
   }
   return false;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveNodeInvokeTrustActor(client: GatewayClient | null): {
+  actorId: string;
+  actorType: "human" | "service";
+  role: string;
+  sessionId: string;
+} {
+  const role = normalizeString(client?.connect?.role)?.toLowerCase() ?? "operator";
+  const actorId =
+    normalizeString(client?.connect?.device?.id) ??
+    normalizeString(client?.connect?.client?.id) ??
+    normalizeString(client?.connId) ??
+    "gateway-client";
+  const sessionId =
+    normalizeString(client?.connect?.client?.id) ??
+    normalizeString(client?.connect?.device?.id) ??
+    `gateway-${actorId}`;
+  return {
+    actorId,
+    actorType: role === "node" ? "service" : "human",
+    role,
+    sessionId,
+  };
+}
+
+type NodeInvokeApprovalContext = {
+  runId: string;
+  decision: "allow-once" | "allow-always";
+};
+
+function extractNodeInvokeApprovalContext(params: unknown): NodeInvokeApprovalContext | null {
+  const record = asRecord(params);
+  if (!record || record.approved !== true) {
+    return null;
+  }
+  const runId = normalizeString(record.runId);
+  if (!runId) {
+    return null;
+  }
+  const decisionRaw = normalizeString(record.approvalDecision);
+  if (decisionRaw !== "allow-once" && decisionRaw !== "allow-always") {
+    return null;
+  }
+  return { runId, decision: decisionRaw };
+}
+
+function resolveNodeInvokeTrustCommand(params: {
+  command: string;
+  forwardedParams: unknown;
+}): string {
+  if (params.command !== "system.run") {
+    return `node:${params.command}`;
+  }
+  const record = asRecord(params.forwardedParams);
+  if (!record) {
+    return "node:system.run";
+  }
+  const resolved = resolveSystemRunCommand({
+    command: record.command,
+    rawCommand: record.rawCommand,
+  });
+  if (!resolved.ok) {
+    return "node:system.run";
+  }
+  const cmdText = resolved.cmdText.trim();
+  return cmdText.length > 0 ? cmdText : "node:system.run";
+}
+
+function resolveNodeInvokeTrustWorkdir(params: {
+  nodeId: string;
+  forwardedParams: unknown;
+}): string {
+  const record = asRecord(params.forwardedParams);
+  const cwd = record ? normalizeString(record.cwd) : null;
+  if (cwd) {
+    return cwd;
+  }
+  return `/node/${params.nodeId}`;
+}
+
+function buildNodeInvokeTrustApprovals(params: {
+  action: Parameters<typeof buildSyntheticApprovalGrant>[0]["action"];
+  approvalContext: NodeInvokeApprovalContext | null;
+  snapshotLookup:
+    | ((
+        runId: string,
+      ) => { createdAtMs: number; expiresAtMs: number; resolvedBy?: string | null } | null)
+    | null;
+}): TrustApprovalGrant[] | undefined {
+  if (!params.approvalContext) {
+    return undefined;
+  }
+  const snapshot = params.snapshotLookup?.(params.approvalContext.runId) ?? null;
+  const createdAtMs = snapshot?.createdAtMs;
+  const ttlMs =
+    snapshot && snapshot.expiresAtMs > snapshot.createdAtMs
+      ? snapshot.expiresAtMs - snapshot.createdAtMs
+      : undefined;
+  const resolvedBy = normalizeString(snapshot?.resolvedBy ?? null);
+  return [
+    buildSyntheticApprovalGrant({
+      action: params.action,
+      approvalId: params.approvalContext.runId,
+      approvers: resolvedBy ? [resolvedBy] : ["approval-system"],
+      scope: params.approvalContext.decision === "allow-always" ? "policy" : "once",
+      nowMs: createdAtMs,
+      ttlMs,
+    }),
+  ];
 }
 
 async function delayMs(ms: number): Promise<void> {
@@ -712,6 +845,99 @@ export const nodeHandlers: GatewayRequestHandlers = {
         );
         return;
       }
+
+      const trustRuntime = resolveTrustRuntimeConfig({ cfg, trustConfig: cfg.trust });
+      const trustActor = resolveNodeInvokeTrustActor(client);
+      const trustApprovalContext = extractNodeInvokeApprovalContext(forwardedParams.params);
+      const trustSnapshotLookup = context.execApprovalManager
+        ? (runId: string) => context.execApprovalManager?.getSnapshot(runId) ?? null
+        : null;
+      const trustCommand = resolveNodeInvokeTrustCommand({
+        command,
+        forwardedParams: forwardedParams.params,
+      });
+      const trustWorkdir = resolveNodeInvokeTrustWorkdir({
+        nodeId,
+        forwardedParams: forwardedParams.params,
+      });
+
+      const trustProposalAction = buildExecTrustAction({
+        runtime: trustRuntime,
+        command: trustCommand,
+        stage: "proposal",
+        host: "node",
+        workdir: trustWorkdir,
+        actorId: trustActor.actorId,
+        actorType: trustActor.actorType,
+        sessionId: trustActor.sessionId,
+        channel: "gateway-rpc",
+        audience: trustActor.role,
+      });
+      const trustProposalApprovals = buildNodeInvokeTrustApprovals({
+        action: trustProposalAction,
+        approvalContext: trustApprovalContext,
+        snapshotLookup: trustSnapshotLookup,
+      });
+      const trustProposal = await evaluateTrustGate({
+        cfg,
+        trustConfig: cfg.trust,
+        action: trustProposalAction,
+        approvals: trustProposalApprovals,
+      });
+      const trustStepUpRequired =
+        trustProposal.mode === "enforce" && trustProposal.decision.decision === "step-up";
+      if (trustProposal.blocked || trustStepUpRequired) {
+        const message = trustStepUpRequired
+          ? `Trust policy requires step-up approval for node.invoke: ${trustProposal.decision.reason}`
+          : `Trust policy denied node.invoke proposal: ${trustProposal.decision.reason}`;
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, message, {
+            details: { code: "TRUST_POLICY_DENY", command, nodeId },
+          }),
+        );
+        return;
+      }
+
+      const trustExecutionAction = buildExecTrustAction({
+        runtime: trustRuntime,
+        command: trustCommand,
+        stage: "execution",
+        host: "node",
+        workdir: trustWorkdir,
+        actorId: trustActor.actorId,
+        actorType: trustActor.actorType,
+        sessionId: trustActor.sessionId,
+        channel: "gateway-rpc",
+        audience: trustActor.role,
+      });
+      const trustExecutionApprovals = buildNodeInvokeTrustApprovals({
+        action: trustExecutionAction,
+        approvalContext: trustApprovalContext,
+        snapshotLookup: trustSnapshotLookup,
+      });
+      const trustExecution = await evaluateTrustGate({
+        cfg,
+        trustConfig: cfg.trust,
+        action: trustExecutionAction,
+        approvals: trustExecutionApprovals,
+      });
+      if (trustExecution.blocked) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            `Trust policy denied node.invoke execution: ${trustExecution.decision.reason}`,
+            {
+              details: { code: "TRUST_POLICY_DENY", command, nodeId },
+            },
+          ),
+        );
+        return;
+      }
+
       const res = await context.nodeRegistry.invoke({
         nodeId,
         command,
