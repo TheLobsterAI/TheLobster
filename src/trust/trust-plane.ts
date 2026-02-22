@@ -477,7 +477,12 @@ function validateApprovalGrant(params: {
     return { ok: false, reason: "destination context drifted" };
   }
 
-  if (dualControlRequired && uniqueNonEmpty(approval.approvers).length < 2) {
+  const approverIds = uniqueNonEmpty(approval.approvers);
+  if (approverIds.length === 0) {
+    return { ok: false, reason: "approval missing approver identity" };
+  }
+
+  if (dualControlRequired && approverIds.length < 2) {
     return { ok: false, reason: "dual-control requirement not satisfied" };
   }
 
@@ -583,6 +588,27 @@ export function evaluateTrustPolicy(params: {
     const reason = `Action model missing required fields: ${missingFields.join(", ")}.`;
     pushChain(chain, "validation", reason, ["REQ-001", "REQ-002"]);
     pushChain(chain, "final", "Denied: invalid action model.", ["INV-01", "REQ-003"]);
+    return {
+      decision: "deny",
+      reason,
+      approval: {
+        required: false,
+        satisfied: false,
+        dualControlRequired: false,
+      },
+      dlp: { blocked: false, reasons: [] },
+      chain,
+      explain: explainChain(chain),
+    };
+  }
+
+  if (
+    params.action.source.tenantId &&
+    params.action.source.tenantId !== params.action.actor.tenantId
+  ) {
+    const reason = "Source tenant does not match actor tenant.";
+    pushChain(chain, "validation", reason, ["REQ-023", "INV-01"]);
+    pushChain(chain, "final", "Denied: cross-tenant source context.", ["REQ-023", "INV-01"]);
     return {
       decision: "deny",
       reason,

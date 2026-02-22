@@ -201,6 +201,22 @@ describe("trust plane policy", () => {
     expect(result.approval.failureReason).toContain("channel mismatch");
   });
 
+  it("rejects approvals without approver identity", () => {
+    const action = buildAction({ risk: "high", stage: "execution" });
+    const policy = buildPolicy();
+    const approval = buildApproval(action, { approvers: ["", "   "] });
+
+    const result = evaluateTrustPolicy({
+      action,
+      policy,
+      approvals: [approval],
+      nowMs: action.context.occurredAtMs + 1_000,
+    });
+
+    expect(result.decision).toBe("deny");
+    expect(result.approval.failureReason).toContain("approver identity");
+  });
+
   it("enforces dual-control for restricted data", () => {
     const action = buildAction({
       risk: "high",
@@ -229,6 +245,19 @@ describe("trust plane policy", () => {
     });
 
     expect(allowed.decision).toBe("allow");
+  });
+
+  it("denies cross-tenant source context", () => {
+    const action = buildAction({
+      source: {
+        tenantId: "tenant-b",
+      },
+    });
+    const policy = buildPolicy();
+
+    const result = evaluateTrustPolicy({ action, policy });
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("Source tenant does not match actor tenant");
   });
 
   it("enforces outbound destination allowlists", () => {
